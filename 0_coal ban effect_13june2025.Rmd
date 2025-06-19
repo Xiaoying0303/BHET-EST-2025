@@ -1,0 +1,3573 @@
+---
+title: "code for coal ban effect paper"
+author: "Xiaoying Li"
+date: "2024-10-30"
+output: html_document
+---
+
+## Load packages
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(DescTools)
+library(webshot2)
+library(networkD3)
+library(ggpattern)
+library(ggh4x)
+library(modeldb)
+library(splines)
+library(marginaleffects)
+library(lme4)
+library(jtools)
+```
+
+## Load data
+
+```{r}
+df_master <- read_csv("../data_raw/BHET_master_data_04Oct2024.csv") %>% 
+  dplyr::filter(wave != 3) %>% 
+  dplyr::left_join(read_csv("../data_raw/met-data.csv"),  
+                     by = c("ptc_id", "hh_id", "wave"))
+```
+
+## New outdoor load data
+
+```{r}
+# outdoor meterology
+met_daily <- read_csv("../data_raw/outdoor/met_interp_compiled.csv") %>% 
+  select(-...1, -district, wave = season) %>% 
+  mutate(day = day(date),
+         month = month(date),
+         year = year(date)) %>% 
+  group_by(day, month, year, village, wave, ban) %>% 
+  summarise(ws = mean(ws),
+            temp = mean(t2m_idw),
+            blh = mean(blh_idw),
+            wdir = mean(wdir),
+            rh = mean(rh)) %>% 
+  mutate(date = paste(year, month, day, sep = "-"),
+         date = as.Date(date)) %>% 
+  ungroup() %>% 
+  select(village, date, wave, ban, ws, temp, blh, wdir, rh)
+
+# Outdoor BC
+bc <- read_csv("../data_raw/outdoor/bc_all_13Nov2024.csv") %>% 
+  select(-...1)
+
+# Outdoor daily PM2.5
+outdoor_daily <- read_csv("../data_raw/outdoor/outdoor_daily_18Jan2024.csv") %>% 
+  select(-...1) %>% 
+  filter(!is.na(date)) %>% 
+  # join in met
+  left_join(met_daily, by = c("village", "date", "wave"))
+
+# Village density
+density <- read_csv("../data_raw/outdoor/spatial_27Feb2024.csv") %>% 
+  select(-...1) %>% 
+  mutate(village = case_when(village == "Dashizi" ~ "Dazhazi",
+                             village == "Longquan" ~ "Longquanyu",
+                             TRUE ~ village))
+
+#Other covariates from master and population for outdoor
+master_covars_outdoor <- read_csv("../data_raw/outdoor/covars_27Feb2024.csv") %>% 
+  select(-...1, district = district.x, -district.y)
+
+# mass master
+mass_master <- read_csv("../data_raw/outdoor/mass_master_2Oct2024.csv")
+
+# ban status
+ban_status <- read_csv("../data_raw/outdoor/BHET_coal-ban-tracking_8Feb2022.csv") %>% 
+  select(district, village, ban_s1 = ban_2018, ban_s2 = ban_2019, 
+         ban_s3 = ban_2020, ban_s4 = ban_2021) %>% 
+  mutate(village = str_to_title(village),
+         village = case_when(village == "Yangshudixia" ~ "Yangshuxia",
+                             TRUE ~ village))
+```
+
+# 1. Energy Transition
+
+```{r}
+# select energy related variables from master data
+df_energy <- df_master %>% 
+  dplyr::filter(wave !=3) %>% 
+  dplyr::select(hh_id, wave, ID_VILLAGE, ID_COUNTY, ban_status_composite, 
+                hp_heating_capacity, hp_capacity_NAs, FUEL_Selected, 
+                ends_with("_Briquettes"), Quantity_Briquettes_NAs, Price_Briquettes_NAs, 
+                ends_with("_Honeycomb_coal"), Price_Honeycomb_coal_NAs, 
+                ends_with("_coal"), Price_Coal_NAs, 
+                ends_with("_LPG"), Quantity_LPG_NAs, Price_LPG_NAs, 
+                ends_with("_ELE"), Quantity_ELE_NAs, Price_ELE_NAs, 
+                ends_with("_Wood"), Quantity_Wood_NAs, Price_Wood_NAs, 
+                ends_with("_Straw"), 
+                ends_with("_Charcoal"), 
+                ends_with("_NaturalGas"), 
+                ends_with("_Biogas"), 
+                Other_Fuel, ends_with("_Other"), Quantity_Other_NAs, Price_Other_NAs, 
+                starts_with("ELE_"), 
+                starts_with("room_heat")) %>% 
+  dplyr::mutate(ban_status = case_when(ban_status_composite == 0 ~ "Untreated", 
+                                       ban_status_composite == 1 ~ "Treated in Wave-2", 
+                                       ban_status_composite == 2 ~ "Treated in Wave-3", 
+                                       ban_status_composite == 3 ~ "Treated in Wave-4"))
+# exclude duplicates from the same household
+df_energy <- df_energy %>% 
+  dplyr::group_by(hh_id, wave) %>% 
+  dplyr::filter(n()==1) %>% 
+  dplyr::bind_rows(df_energy %>% 
+                     group_by(hh_id, wave) %>% 
+                     filter(n()>1) %>% 
+                     ungroup() %>% 
+                     filter(!is.na(FUEL_Selected)) %>% 
+                     group_by(hh_id, wave) %>% 
+                     filter(n()==1)) %>% 
+  dplyr::bind_rows(df_energy %>% 
+                     group_by(hh_id, wave) %>% 
+                     filter(n()>1) %>% 
+                     ungroup() %>% 
+                     filter(!is.na(FUEL_Selected)) %>% 
+                     group_by(hh_id, wave) %>% 
+                     filter(n()>1) %>% 
+                     ungroup() %>% 
+                     distinct() %>% 
+                     group_by(hh_id, wave) %>% 
+                     filter(n()==1)) %>% 
+  dplyr::bind_rows(df_energy %>% 
+                     group_by(hh_id, wave) %>% 
+                     filter(n()>1) %>% 
+                     ungroup() %>% 
+                     filter(!is.na(FUEL_Selected)) %>% 
+                     group_by(hh_id, wave) %>% 
+                     filter(n()>1) %>% 
+                     ungroup() %>% 
+                     distinct() %>% 
+                     group_by(hh_id, wave) %>% 
+                     filter(n()>1, 
+                            !is.na(ELE_remaining_money)))
+```
+
+## heating energy
+
+```{r}
+#I don't believe any households in this area would use LPG or natural gas for heating. Additionally, straw is forbidden here, and it's unrealistic to use charcoal for heating. Even if households using these fuels exist, they are extremely rare, so I haven't included them in this analysis.
+
+df_heating <- df_energy %>% 
+  dplyr::mutate(Heat_1_Briquettes = 
+                  case_when(Heat_Briquettes == 2 ~ "Yes", 
+                            is.na(Heat_Briquettes) & 
+                              FUEL_Briquettes%in%c("2", "1;2;3", "2;3", "1;2") ~ "Yes", 
+                            Quantity_Briquettes>=1 ~ "Yes", #if the quantity of Briquettes is over 1 ton, the household is identified as using Briquettes for heating
+                            TRUE ~ "No"), 
+                Heat_2_Honeycomb_coal = 
+                  case_when(Heat_Honeycomb_coal == 2 ~ "Yes", 
+                            is.na(Heat_Honeycomb_coal) & 
+                              FUEL_Honeycomb_coal%in%c("2", "1;2;3", "2;3", "1;2") ~ "Yes", 
+                            Quantity_Honeycomb_coal>=100 ~ "Yes", #if the quantity of Honeycomb_coal is over 100, the household is identified as using Honeycomb_coal for heating
+                            TRUE ~ "No"), 
+                Heat_3_coal = 
+                  case_when(Heat_coal == 2 ~ "Yes", 
+                            is.na(Heat_coal) & 
+                              FUEL_Coal%in%c("2", "1;2;3", "2;3", "1;2") ~ "Yes", 
+                            Quantity_coal>=1 ~ "Yes", #if the quantity of Coal is over 1, the household is identified as using Coal for heating
+                            TRUE ~ "No"), 
+                Heat_4_ELE = 
+                  case_when(Heat_ELE == 2 ~ "Yes", 
+                            is.na(Heat_ELE) & 
+                              FUEL_ELE%in%c("2", "1;2;3", "2;3", "1;2") ~ "Yes", 
+                            TRUE ~ "No"), 
+                Heat_5_Wood = 
+                  case_when(Heat_Wood == 2 ~ "Yes", 
+                            is.na(Heat_Wood) & 
+                              FUEL_Wood%in%c("2", "1;2;3", "2;3", "1;2") ~ "Yes", 
+#Many households reported using wood but not for heating, I doubted this. If the households reported to use kang_wood or Wood stove (directly) for room heating, it was identified as using Wood for heating.
+                            is.na(Heat_Wood) & room_heat1_1==4|room_heat1_1==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat1_2==4|room_heat1_2==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat1_3==4|room_heat1_3==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat1_4==4|room_heat1_4==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat1_5==4|room_heat1_5==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat2_1==4|room_heat2_1==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat2_2==4|room_heat2_2==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat2_3==4|room_heat2_3==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat2_4==4|room_heat2_4==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat2_5==4|room_heat2_5==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat3_1==4|room_heat3_1==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat3_2==4|room_heat3_2==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat3_3==4|room_heat3_3==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat3_4==4|room_heat3_4==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat3_5==4|room_heat3_5==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat4_1==4|room_heat4_1==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat4_2==4|room_heat4_2==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat4_3==4|room_heat4_3==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat4_4==4|room_heat4_4==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat5_1==4|room_heat5_1==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat5_2==4|room_heat5_2==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat5_3==4|room_heat5_3==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat5_4==4|room_heat5_4==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat6_1==4|room_heat6_1==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat6_2==4|room_heat6_2==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat6_3==4|room_heat6_3==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat6_4==4|room_heat6_4==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat7_1==4|room_heat7_1==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat7_2==4|room_heat7_2==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat7_3==4|room_heat7_3==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat7_4==4|room_heat7_4==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat8_1==4|room_heat8_1==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat8_2==4|room_heat8_2==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat8_3==4|room_heat8_3==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat8_4==4|room_heat8_4==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat9_1==4|room_heat9_1==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat9_2==4|room_heat9_2==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat9_3==4|room_heat9_3==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat10_1==4|room_heat10_1==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat10_2==4|room_heat10_2==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat11_1==4|room_heat11_1==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat11_2==4|room_heat11_2==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat12_1==4|room_heat12_1==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat12_2==4|room_heat12_2==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat13_1==4|room_heat13_1==7 ~ "Yes", 
+                            is.na(Heat_Wood) & room_heat13_2==4|room_heat13_2==7 ~ "Yes", 
+                            Quantity_Wood>=1000 ~ "Yes", #if the quantity of Wood is over 1000, the household is identified as using Wood for heating
+                            TRUE ~ "No")) %>% 
+  mutate(Room_Heat_coal = case_when(room_heat1_1 == 5 | room_heat1_1 == 6 | 
+                                      room_heat1_2 == 5 | room_heat1_2 == 6 | 
+                                      room_heat1_3 == 5 | room_heat1_3 == 6 | 
+                                      room_heat1_4 == 5 | room_heat1_4 == 6 | 
+                                      room_heat1_5 == 5 | room_heat1_5 == 6 | 
+                                      room_heat2_1 == 5 | room_heat2_1 == 6 | 
+                                      room_heat2_2 == 5 | room_heat2_2 == 6 | 
+                                      room_heat2_3 == 5 | room_heat2_3 == 6 | 
+                                      room_heat2_4 == 5 | room_heat2_4 == 6 | 
+                                      room_heat2_5 == 5 | room_heat2_5 == 6 | 
+                                      room_heat3_1 == 5 | room_heat3_1 == 6 | 
+                                      room_heat3_2 == 5 | room_heat3_2 == 6 | 
+                                      room_heat3_3 == 5 | room_heat3_3 == 6 | 
+                                      room_heat3_4 == 5 | room_heat3_4 == 6 | 
+                                      room_heat3_5 == 5 | room_heat3_5 == 6 | 
+                                      room_heat4_1 == 5 | room_heat4_1 == 6 | 
+                                      room_heat4_2 == 5 | room_heat4_2 == 6 | 
+                                      room_heat4_3 == 5 | room_heat4_3 == 6 | 
+                                      room_heat4_4 == 5 | room_heat4_4 == 6 | 
+                                      room_heat5_1 == 5 | room_heat5_1 == 6 | 
+                                      room_heat5_2 == 5 | room_heat5_2 == 6 | 
+                                      room_heat5_3 == 5 | room_heat5_3 == 6 | 
+                                      room_heat5_4 == 5 | room_heat5_4 == 6 | 
+                                      room_heat6_1 == 5 | room_heat6_1 == 6 | 
+                                      room_heat6_2 == 5 | room_heat6_2 == 6 | 
+                                      room_heat6_3 == 5 | room_heat6_3 == 6 | 
+                                      room_heat6_4 == 5 | room_heat6_4 == 6 | 
+                                      room_heat7_1 == 5 | room_heat7_1 == 6 | 
+                                      room_heat7_2 == 5 | room_heat7_2 == 6 | 
+                                      room_heat7_3 == 5 | room_heat7_3 == 6 | 
+                                      room_heat7_4 == 5 | room_heat7_4 == 6 | 
+                                      room_heat8_1 == 5 | room_heat8_1 == 6 | 
+                                      room_heat8_2 == 5 | room_heat8_2 == 6 | 
+                                      room_heat8_3 == 5 | room_heat8_3 == 6 | 
+                                      room_heat8_4 == 5 | room_heat8_4 == 6 | 
+                                      room_heat9_1 == 5 | room_heat9_1 == 6 | 
+                                      room_heat9_2 == 5 | room_heat9_2 == 6 | 
+                                      room_heat9_3 == 5 | room_heat9_3 == 6 | 
+                                      room_heat10_1 == 5 | room_heat10_1 == 6 | 
+                                      room_heat10_2 == 5 | room_heat10_2 == 6 | 
+                                      room_heat11_1 == 5 | room_heat11_1 == 6 | 
+                                      room_heat11_2 == 5 | room_heat11_2 == 6 | 
+                                      room_heat12_1 == 5 | room_heat12_1 == 6 | 
+                                      room_heat12_2 == 5 | room_heat12_2 == 6 | 
+                                      room_heat13_1 == 5 | room_heat13_1 == 6 | 
+                                      room_heat13_2 == 5 | room_heat13_2 == 6 ~ "Yes", 
+                                 TRUE ~ "No"), 
+         Room_Heat_wood = case_when(room_heat1_1 == 4 | room_heat1_1 == 7 | 
+                                      room_heat1_2 == 4 | room_heat1_2 == 7 | 
+                                      room_heat1_3 == 4 | room_heat1_3 == 7 | 
+                                      room_heat1_4 == 4 | room_heat1_4 == 7 | 
+                                      room_heat1_5 == 4 | room_heat1_5 == 7 | 
+                                      room_heat2_1 == 4 | room_heat2_1 == 7 | 
+                                      room_heat2_2 == 4 | room_heat2_2 == 7 | 
+                                      room_heat2_3 == 4 | room_heat2_3 == 7 | 
+                                      room_heat2_4 == 4 | room_heat2_4 == 7 | 
+                                      room_heat2_5 == 4 | room_heat2_5 == 7 | 
+                                      room_heat3_1 == 4 | room_heat3_1 == 7 | 
+                                      room_heat3_2 == 4 | room_heat3_2 == 7 | 
+                                      room_heat3_3 == 4 | room_heat3_3 == 7 | 
+                                      room_heat3_4 == 4 | room_heat3_4 == 7 | 
+                                      room_heat3_5 == 4 | room_heat3_5 == 7 | 
+                                      room_heat4_1 == 4 | room_heat4_1 == 7 | 
+                                      room_heat4_2 == 4 | room_heat4_2 == 7 | 
+                                      room_heat4_3 == 4 | room_heat4_3 == 7 | 
+                                      room_heat4_4 == 4 | room_heat4_4 == 7 | 
+                                      room_heat5_1 == 4 | room_heat5_1 == 7 | 
+                                      room_heat5_2 == 4 | room_heat5_2 == 7 | 
+                                      room_heat5_3 == 4 | room_heat5_3 == 7 | 
+                                      room_heat5_4 == 4 | room_heat5_4 == 7 | 
+                                      room_heat6_1 == 4 | room_heat6_1 == 7 | 
+                                      room_heat6_2 == 4 | room_heat6_2 == 7 | 
+                                      room_heat6_3 == 4 | room_heat6_3 == 7 | 
+                                      room_heat6_4 == 4 | room_heat6_4 == 7 | 
+                                      room_heat7_1 == 4 | room_heat7_1 == 7 | 
+                                      room_heat7_2 == 4 | room_heat7_2 == 7 | 
+                                      room_heat7_3 == 4 | room_heat7_3 == 7 | 
+                                      room_heat7_4 == 4 | room_heat7_4 == 7 | 
+                                      room_heat8_1 == 4 | room_heat8_1 == 7 | 
+                                      room_heat8_2 == 4 | room_heat8_2 == 7 | 
+                                      room_heat8_3 == 4 | room_heat8_3 == 7 | 
+                                      room_heat8_4 == 4 | room_heat8_4 == 7 | 
+                                      room_heat9_1 == 4 | room_heat9_1 == 7 | 
+                                      room_heat9_2 == 4 | room_heat9_2 == 7 | 
+                                      room_heat9_3 == 4 | room_heat9_3 == 7 | 
+                                      room_heat10_1 == 4 | room_heat10_1 == 7 | 
+                                      room_heat10_2 == 4 | room_heat10_2 == 7 | 
+                                      room_heat11_1 == 4 | room_heat11_1 == 7 | 
+                                      room_heat11_2 == 4 | room_heat11_2 == 7 | 
+                                      room_heat12_1 == 4 | room_heat12_1 == 7 | 
+                                      room_heat12_2 == 4 | room_heat12_2 == 7 | 
+                                      room_heat13_1 == 4 | room_heat13_1 == 7 | 
+                                      room_heat13_2 == 4 | room_heat13_2 == 7 ~ "Yes", 
+                                 TRUE ~ "No"), 
+         Room_Heat_ele = case_when(room_heat1_1 == 8 | room_heat1_1 == 9 | 
+                                     room_heat1_1 == 10 | room_heat1_1 == 11 | 
+                                      room_heat1_2 == 8 | room_heat1_2 == 9 | 
+                                     room_heat1_2 == 10 | room_heat1_2 == 11 | 
+                                      room_heat1_3 == 8 | room_heat1_3 == 9 | 
+                                     room_heat1_3 == 10 | room_heat1_3 == 11 | 
+                                      room_heat1_4 == 8 | room_heat1_4 == 9 | 
+                                     room_heat1_4 == 10 | room_heat1_4 == 11 | 
+                                      room_heat1_5 == 8 | room_heat1_5 == 9 | 
+                                     room_heat1_5 == 10 | room_heat1_5 == 11 | 
+                                      room_heat2_1 == 8 | room_heat2_1 == 9 | 
+                                     room_heat2_1 == 10 | room_heat2_1 == 11 | 
+                                      room_heat2_2 == 8 | room_heat2_2 == 9 | 
+                                     room_heat2_2 == 10 | room_heat2_2 == 11 | 
+                                      room_heat2_3 == 8 | room_heat2_3 == 9 | 
+                                     room_heat2_3 == 10 | room_heat2_3 == 11 | 
+                                      room_heat2_4 == 8 | room_heat2_4 == 9 | 
+                                     room_heat2_4 == 10 | room_heat2_4 == 11 | 
+                                      room_heat2_5 == 8 | room_heat2_5 == 9 | 
+                                     room_heat2_5 == 10 | room_heat2_5 == 11 | 
+                                      room_heat3_1 == 8 | room_heat3_1 == 9 | 
+                                     room_heat3_1 == 10 | room_heat3_1 == 11 | 
+                                      room_heat3_2 == 8 | room_heat3_2 == 9 | 
+                                     room_heat3_2 == 10 | room_heat3_2 == 11 | 
+                                      room_heat3_3 == 8 | room_heat3_3 == 9 | 
+                                     room_heat3_3 == 10 | room_heat3_3 == 11 | 
+                                      room_heat3_4 == 8 | room_heat3_4 == 9 | 
+                                     room_heat3_4 == 10 | room_heat3_4 == 11 | 
+                                      room_heat3_5 == 8 | room_heat3_5 == 9 | 
+                                     room_heat3_5 == 10 | room_heat3_5 == 11 | 
+                                      room_heat4_1 == 8 | room_heat4_1 == 9 | 
+                                     room_heat4_1 == 10 | room_heat4_1 == 11 | 
+                                      room_heat4_2 == 8 | room_heat4_2 == 9 | 
+                                     room_heat4_2 == 10 | room_heat4_2 == 11 | 
+                                      room_heat4_3 == 8 | room_heat4_3 == 9 | 
+                                     room_heat4_3 == 10 | room_heat4_3 == 11 | 
+                                      room_heat4_4 == 8 | room_heat4_4 == 9 | 
+                                     room_heat4_4 == 10 | room_heat4_4 == 11 | 
+                                      room_heat5_1 == 8 | room_heat5_1 == 9 | 
+                                     room_heat5_1 == 10 | room_heat5_1 == 11 | 
+                                      room_heat5_2 == 8 | room_heat5_2 == 9 | 
+                                     room_heat5_2 == 10 | room_heat5_2 == 11 | 
+                                      room_heat5_3 == 8 | room_heat5_3 == 9 | 
+                                     room_heat5_3 == 10 | room_heat5_3 == 11 | 
+                                      room_heat5_4 == 8 | room_heat5_4 == 9 | 
+                                     room_heat5_4 == 10 | room_heat5_4 == 11 | 
+                                      room_heat6_1 == 8 | room_heat6_1 == 9 | 
+                                     room_heat6_1 == 10 | room_heat6_1 == 11 | 
+                                      room_heat6_2 == 8 | room_heat6_2 == 9 | 
+                                     room_heat6_2 == 10 | room_heat6_2 == 11 | 
+                                      room_heat6_3 == 8 | room_heat6_3 == 9 | 
+                                     room_heat6_3 == 10 | room_heat6_3 == 11 | 
+                                      room_heat6_4 == 8 | room_heat6_4 == 9 | 
+                                     room_heat6_4 == 10 | room_heat6_4 == 11 | 
+                                      room_heat7_1 == 8 | room_heat7_1 == 9 | 
+                                     room_heat7_1 == 10 | room_heat7_1 == 11 | 
+                                      room_heat7_2 == 8 | room_heat7_2 == 9 | 
+                                     room_heat7_2 == 10 | room_heat7_2 == 11 | 
+                                      room_heat7_3 == 8 | room_heat7_3 == 9 | 
+                                     room_heat7_3 == 10 | room_heat7_3 == 11 | 
+                                      room_heat7_4 == 8 | room_heat7_4 == 9 | 
+                                     room_heat7_4 == 10 | room_heat7_4 == 11 | 
+                                      room_heat8_1 == 8 | room_heat8_1 == 9 | 
+                                     room_heat8_1 == 10 | room_heat8_1 == 11 | 
+                                      room_heat8_2 == 8 | room_heat8_2 == 9 | 
+                                     room_heat8_2 == 10 | room_heat8_2 == 11 | 
+                                      room_heat8_3 == 8 | room_heat8_3 == 9 | 
+                                     room_heat8_3 == 10 | room_heat8_3 == 11 | 
+                                      room_heat8_4 == 8 | room_heat8_4 == 9 | 
+                                     room_heat8_4 == 10 | room_heat8_4 == 11 | 
+                                      room_heat9_1 == 8 | room_heat9_1 == 9 | 
+                                     room_heat9_1 == 10 | room_heat9_1 == 11 | 
+                                      room_heat9_2 == 8 | room_heat9_2 == 9 | 
+                                     room_heat9_2 == 10 | room_heat9_2 == 11 | 
+                                      room_heat9_3 == 8 | room_heat9_3 == 9 | 
+                                     room_heat9_3 == 10 | room_heat9_3 == 11 | 
+                                      room_heat10_1 == 8 | room_heat10_1 == 9 | 
+                                     room_heat10_1 == 10 | room_heat10_1 == 11 | 
+                                      room_heat10_2 == 8 | room_heat10_2 == 9 | 
+                                     room_heat10_2 == 10 | room_heat10_2 == 11 | 
+                                      room_heat11_1 == 8 | room_heat11_1 == 9 | 
+                                     room_heat11_1 == 10 | room_heat11_1 == 11 | 
+                                      room_heat11_2 == 8 | room_heat11_2 == 9 | 
+                                     room_heat11_2 == 10 | room_heat11_2 == 11 | 
+                                      room_heat12_1 == 8 | room_heat12_1 == 9 | 
+                                     room_heat12_1 == 10 | room_heat12_1 == 11 | 
+                                      room_heat12_2 == 8 | room_heat12_2 == 9 | 
+                                     room_heat12_2 == 10 | room_heat12_2 == 11 | 
+                                      room_heat13_1 == 8 | room_heat13_1 == 9 | 
+                                     room_heat13_1 == 10 | room_heat13_1 == 11 | 
+                                      room_heat13_2 == 8 | room_heat13_2 == 9 | 
+                                     room_heat13_2 == 10 | room_heat13_2 == 11 ~ "Yes", 
+                                 TRUE ~ "No")) %>% 
+  select(hh_id, wave, ID_VILLAGE, ID_COUNTY, ban_status, 
+         Heat_1_Briquettes, Heat_2_Honeycomb_coal, Heat_3_coal, Heat_4_ELE, Heat_5_Wood, 
+         Room_Heat_coal, Room_Heat_wood, Room_Heat_ele) %>% 
+  mutate(Heat_coal = case_when(Heat_1_Briquettes == "Yes" | 
+                                 Heat_2_Honeycomb_coal == "Yes" |
+                                 Heat_3_coal == "Yes" | 
+                                 Room_Heat_coal == "Yes" ~ "Yes", 
+                               TRUE ~ "No"), 
+         Heat_wood = case_when(Heat_5_Wood == "Yes" | 
+                                 Room_Heat_wood == "Yes" ~ "Yes", 
+                               TRUE ~ "No"), 
+         Heat_ele = case_when(Heat_4_ELE == "Yes" | 
+                                 Room_Heat_ele == "Yes" ~ "Yes", 
+                               TRUE ~ "No"), 
+         Heat = case_when(Heat_coal == "Yes" & Heat_wood == "Yes" & Heat_ele == "Yes" ~ 
+                            "Wood+Coal+Electricity", 
+                          Heat_coal == "Yes" & Heat_wood == "Yes" & Heat_ele == "No" ~ 
+                            "Wood+Coal", 
+                          Heat_coal == "Yes" & Heat_wood == "No" & Heat_ele == "Yes" ~ 
+                            "Coal+Electricity", 
+                          Heat_coal == "No" & Heat_wood == "Yes" & Heat_ele == "Yes" ~ 
+                            "Wood+Electricity", 
+                          Heat_coal == "Yes" & Heat_wood == "No" & Heat_ele == "No" ~ 
+                            "Coal", 
+                          Heat_coal == "No" & Heat_wood == "Yes" & Heat_ele == "No" ~ 
+                            "Wood", 
+                          Heat_coal == "No" & Heat_wood == "No" & Heat_ele == "Yes" ~ 
+                            "Electricity", 
+                          Heat_coal == "No" & Heat_wood == "No" & Heat_ele == "No" ~ 
+                            "No heating")) 
+```
+
+### links: summarize data for sankey diagram
+
+```{r}
+#overall
+df_heating %>% 
+  select(hh_id, wave, Heat) %>% 
+  mutate(wave = paste0("Wave-", wave), 
+         Heat = case_when(Heat == "Electricity" ~ "1-Electricity", 
+                          Heat == "Coal+Electricity" ~ "2-Coal+Electricity", 
+                          Heat == "Wood+Electricity" ~ "3-Wood+Electricity", 
+                          Heat == "Wood+Coal+Electricity" ~ "4-Wood+Coal+Electricity", 
+                          Heat == "Coal" ~ "5-Coal", 
+                          Heat == "Wood" ~ "6-Wood", 
+                          Heat == "Wood+Coal" ~ "7-Wood+Coal", 
+                          Heat == "No heating" ~ "8-No heating")) %>% 
+  pivot_wider(names_from = "wave", 
+              values_from = "Heat") %>% 
+  group_by(`Wave-1`, `Wave-2`) %>% 
+  #group_by(`Wave-2`, `Wave-4`) %>% 
+  summarise(n = n())
+
+#Untreated
+df_heating %>% 
+  filter(ban_status == "Untreated") %>% 
+  select(hh_id, wave, Heat) %>% 
+  mutate(wave = paste0("Wave-", wave), 
+         Heat = case_when(Heat == "Electricity" ~ "1-Electricity", 
+                          Heat == "Coal+Electricity" ~ "2-Coal+Electricity", 
+                          Heat == "Wood+Electricity" ~ "3-Wood+Electricity", 
+                          Heat == "Wood+Coal+Electricity" ~ "4-Wood+Coal+Electricity", 
+                          Heat == "Coal" ~ "5-Coal", 
+                          Heat == "Wood" ~ "6-Wood", 
+                          Heat == "Wood+Coal" ~ "7-Wood+Coal", 
+                          Heat == "No heating" ~ "8-No heating")) %>% 
+  pivot_wider(names_from = "wave", 
+              values_from = "Heat") %>% 
+  #group_by(`Wave-1`, `Wave-2`) %>% 
+  group_by(`Wave-2`, `Wave-4`) %>% 
+  summarise(n = n())
+
+#treated in wave-2
+df_heating %>% 
+  filter(ban_status == "Treated in Wave-2") %>% 
+  select(hh_id, wave, Heat) %>% 
+  mutate(wave = paste0("Wave-", wave), 
+         Heat = case_when(Heat == "Electricity" ~ "1-Electricity", 
+                          Heat == "Coal+Electricity" ~ "2-Coal+Electricity", 
+                          Heat == "Wood+Electricity" ~ "3-Wood+Electricity", 
+                          Heat == "Wood+Coal+Electricity" ~ "4-Wood+Coal+Electricity", 
+                          Heat == "Coal" ~ "5-Coal", 
+                          Heat == "Wood" ~ "6-Wood", 
+                          Heat == "Wood+Coal" ~ "7-Wood+Coal", 
+                          Heat == "No heating" ~ "8-No heating")) %>% 
+  pivot_wider(names_from = "wave", 
+              values_from = "Heat") %>% 
+  #group_by(`Wave-1`, `Wave-2`) %>% 
+  group_by(`Wave-2`, `Wave-4`) %>% 
+  summarise(n = n())
+
+#treated in wave-3
+df_heating %>% 
+  filter(ban_status == "Treated in Wave-3") %>% 
+  select(hh_id, wave, Heat) %>% 
+  mutate(wave = paste0("Wave-", wave), 
+         Heat = case_when(Heat == "Electricity" ~ "1-Electricity", 
+                          Heat == "Coal+Electricity" ~ "2-Coal+Electricity", 
+                          Heat == "Wood+Electricity" ~ "3-Wood+Electricity", 
+                          Heat == "Wood+Coal+Electricity" ~ "4-Wood+Coal+Electricity", 
+                          Heat == "Coal" ~ "5-Coal", 
+                          Heat == "Wood" ~ "6-Wood", 
+                          Heat == "Wood+Coal" ~ "7-Wood+Coal", 
+                          Heat == "No heating" ~ "8-No heating")) %>% 
+  pivot_wider(names_from = "wave", 
+              values_from = "Heat") %>% 
+  #group_by(`Wave-1`, `Wave-2`) %>% 
+  group_by(`Wave-2`, `Wave-4`) %>% 
+  summarise(n = n())
+
+#treated in wave-4
+df_heating %>% 
+  filter(ban_status == "Treated in Wave-4") %>% 
+  select(hh_id, wave, Heat) %>% 
+  mutate(wave = paste0("Wave-", wave), 
+         Heat = case_when(Heat == "Electricity" ~ "1-Electricity", 
+                          Heat == "Coal+Electricity" ~ "2-Coal+Electricity", 
+                          Heat == "Wood+Electricity" ~ "3-Wood+Electricity", 
+                          Heat == "Wood+Coal+Electricity" ~ "4-Wood+Coal+Electricity", 
+                          Heat == "Coal" ~ "5-Coal", 
+                          Heat == "Wood" ~ "6-Wood", 
+                          Heat == "Wood+Coal" ~ "7-Wood+Coal", 
+                          Heat == "No heating" ~ "8-No heating")) %>% 
+  pivot_wider(names_from = "wave", 
+              values_from = "Heat") %>% 
+  #group_by(`Wave-1`, `Wave-2`) %>% 
+  group_by(`Wave-2`, `Wave-4`) %>% 
+  summarise(n = n())
+```
+
+### sankey diagram-Overall
+
+```{r}
+#nodes
+node_overall <- df_heating %>% 
+  select(hh_id, wave, Heat) %>% 
+  mutate(wave = paste0("Wave-", wave), 
+         Heat = case_when(Heat == "Electricity" ~ "1-Electricity", 
+                          Heat == "Coal+Electricity" ~ "2-Coal+Electricity", 
+                          Heat == "Wood+Electricity" ~ "3-Wood+Electricity", 
+                          Heat == "Wood+Coal+Electricity" ~ "4-Wood+Coal+Electricity", 
+                          Heat == "Coal" ~ "5-Coal", 
+                          Heat == "Wood" ~ "6-Wood", 
+                          Heat == "Wood+Coal" ~ "7-Wood+Coal", 
+                          Heat == "No heating" ~ "8-No heating")) %>% 
+  group_by(wave, Heat) %>% 
+  summarise(n = n()) %>% 
+  left_join(df_heating %>% 
+              select(hh_id, wave, Heat) %>% 
+              mutate(wave = paste0("Wave-", wave)) %>% 
+              group_by(wave) %>% 
+              summarise(all = n()), 
+            by = "wave") %>% 
+  mutate(frac = as.numeric(n/all*100), 
+         frac = round(frac, 1),
+         frac_lab = paste0(frac, "%"), 
+         frac_lab = case_when(wave == "Wave-2" & Heat == "4-Wood+Coal+Electricity" ~ "29.5%-", 
+                              TRUE ~ frac_lab))
+
+links <- read_csv("../data_processed/sankey_links_fuel_type.csv") %>% 
+                filter(status == "Overall")
+
+node_color <- 'd3.scaleOrdinal() 
+.domain(["1.7%", "16.5%", "8.5%", "29.9%", "11%", "1.9%", "29.5%", "1%", 
+        "10.4%", "13.9%", "20.8%", "29.5%-", "8.3%",  "1.6%",  "14.6%", "0.9%", 
+        "24.4%", "15.5%", "33.1%", "21.7%", "0.5%",  "0.3%",  "4.2%",  "0.3%" ]) 
+.range([
+"#033800", "#208820", "#78D070", "#C0E8A0", "#C4C4C4", "#939393", "#4A4A4A", "#000000",
+"#033800", "#208820", "#78D070", "#C0E8A0", "#C4C4C4", "#939393", "#4A4A4A", "#000000", 
+"#033800", "#208820", "#78D070", "#C0E8A0", "#C4C4C4", "#939393", "#4A4A4A", "#000000"
+])'
+
+sankey_overall <- sankeyNetwork(Links = links, 
+              Nodes = node_overall,
+              Source = "source", Target = "target",
+              Value = "values", NodeID = "frac_lab", 
+              fontSize = 16, fontFamily = "Arial",
+              nodeWidth = 40, iterations = 0, colourScale = node_color, 
+              sinksRight = FALSE, width = 800, height = 500)
+sankey_overall
+saveNetwork(sankey_overall, "../figure/Sankey diagram_Overall.html")
+```
+
+### sankey diagram-Untreated
+
+```{r}
+#nodes
+node_never <- df_heating %>% 
+  filter(ban_status == "Untreated") %>% 
+  select(hh_id, wave, Heat) %>% 
+  mutate(wave = paste0("Wave-", wave), 
+         Heat = case_when(Heat == "Electricity" ~ "1-Electricity", 
+                          Heat == "Coal+Electricity" ~ "2-Coal+Electricity", 
+                          Heat == "Wood+Electricity" ~ "3-Wood+Electricity", 
+                          Heat == "Wood+Coal+Electricity" ~ "4-Wood+Coal+Electricity", 
+                          Heat == "Coal" ~ "5-Coal", 
+                          Heat == "Wood" ~ "6-Wood", 
+                          Heat == "Wood+Coal" ~ "7-Wood+Coal", 
+                          Heat == "No heating" ~ "8-No heating")) %>% 
+  group_by(wave, Heat) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>% 
+  left_join(df_heating %>% 
+              filter(ban_status == "Untreated") %>% 
+              select(hh_id, wave, Heat) %>% 
+              mutate(wave = paste0("Wave-", wave)) %>% 
+              group_by(wave) %>% 
+              summarise(all = n()) %>% 
+              ungroup(), 
+            by = "wave") %>% 
+  mutate(frac = as.numeric(n/all*100), 
+         frac = round(frac, 1),
+         frac_lab = paste0(frac, "%"), 
+         frac_lab = case_when(wave == "Wave-4" & Heat == "6-Wood" ~ "0.5%.", 
+                              TRUE ~ frac_lab)) %>% 
+  add_row(wave = "Wave-4", Heat="8-No heating", n =0, all = 0, frac = 0, frac_lab = "0%")
+
+links <- read_csv("../data_processed/sankey_links_fuel_type.csv") %>% 
+                filter(status == "Control") 
+
+node_color <- 'd3.scaleOrdinal() 
+.domain(["2.7%",  "20.6%", "8.4%",  "24.1%", "12.5%", "2.2%",  "28.8%", "0.7%", 
+        "7.3%",  "19.3%", "9.4%",  "34.4%", "11.3%", "1.6%",  "16.2%", "0.5%", 
+        "18.6%", "25.4%", "12.8%", "35%",   "0.8%",  "0.5%.",  "6.8%",  "0%",  ]) 
+.range([
+"#033800", "#208820", "#78D070", "#C0E8A0", "#C4C4C4", "#939393", "#4A4A4A", "#000000",
+"#033800", "#208820", "#78D070", "#C0E8A0", "#C4C4C4", "#939393", "#4A4A4A", "#000000", 
+"#033800", "#208820", "#78D070", "#C0E8A0", "#C4C4C4", "#939393", "#4A4A4A", "#000000"
+])'
+sankey_untreated <- sankeyNetwork(Links = links, 
+              Nodes = node_never,
+              Source = "source", Target = "target",
+              Value = "values", NodeID = "frac_lab", 
+              fontSize = 16, fontFamily = "Arial",
+              nodeWidth = 40, iterations = 0, colourScale = node_color, 
+              sinksRight = FALSE, width = 800, height = 500)
+sankey_untreated
+saveNetwork(sankey_untreated, "../figure/Sankey diagram_Control.html")
+```
+
+### sankey diagram-Treated in Wave-2
+
+```{r}
+#nodes
+node_W2 <- df_heating %>% 
+  filter(ban_status == "Treated in Wave-2") %>% 
+  select(hh_id, wave, Heat) %>% 
+  mutate(wave = paste0("Wave-", wave), 
+         Heat = case_when(Heat == "Electricity" ~ "1-Electricity", 
+                          Heat == "Coal+Electricity" ~ "2-Coal+Electricity", 
+                          Heat == "Wood+Electricity" ~ "3-Wood+Electricity", 
+                          Heat == "Wood+Coal+Electricity" ~ "4-Wood+Coal+Electricity", 
+                          Heat == "Coal" ~ "5-Coal", 
+                          Heat == "Wood" ~ "6-Wood", 
+                          Heat == "Wood+Coal" ~ "7-Wood+Coal", 
+                          Heat == "No heating" ~ "8-No heating")) %>% 
+  group_by(wave, Heat) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>% 
+  left_join(df_heating %>% 
+              filter(ban_status == "Treated in Wave-2") %>% 
+              select(hh_id, wave, Heat) %>% 
+              mutate(wave = paste0("Wave-", wave)) %>% 
+              group_by(wave) %>% 
+              summarise(all = n()) %>% 
+              ungroup(), 
+            by = "wave") %>% 
+  mutate(frac = as.numeric(n/all*100), 
+         frac = round(frac, 1),
+         frac_lab = paste0(frac, "%"), 
+         frac_lab = case_when(wave == "Wave-1" & Heat == "5-Coal" ~ "7.2%.", 
+                              wave == "Wave-2" & Heat == "7-Wood+Coal" ~ "0.9%.", 
+                              wave == "Wave-2" & Heat == "8-No heating" ~ "0.9%..", 
+                              wave == "Wave-2" & Heat == "6-Wood" ~ "1.4%.", 
+                              wave == "Wave-4" & Heat == "8-No heating" ~ "1.4%..", 
+                              TRUE ~ frac_lab)) %>% 
+  add_row(wave = "Wave-1", Heat="1-Electricity", n =0, all = 0, frac = 0, frac_lab = "0%") %>% 
+  add_row(wave = "Wave-4", Heat="2-Coal+Electricity", n =0, all = 0, frac = 0, frac_lab = "0%.") %>% 
+  add_row(wave = "Wave-4", Heat="5-Coal", n =0, all = 0, frac = 0, frac_lab = "0%_") %>% 
+  add_row(wave = "Wave-4", Heat="6-Wood", n =0, all = 0, frac = 0, frac_lab = "0%-") %>% 
+  add_row(wave = "Wave-4", Heat="7-Wood+Coal", n =0, all = 0, frac = 0, frac_lab = "0%=") %>% 
+  arrange(wave, Heat)
+
+links <- read_csv("../data_processed/sankey_links_fuel_type.csv") %>% 
+                filter(status == "Treated in Wave-2") 
+
+node_color <- 'd3.scaleOrdinal() 
+.domain(["0%",    "7.2%",  "5.6%",  "47.2%", "7.2%.",  "1%",    "31.3%", "0.5%",  
+         "24.1%", "1.4%",  "62.7%", "7.7%",  "0.9%",  "1.4%.",  "0.9%.",  "0.9%..",  
+         "37.3%", "0%.",   "58.9%", "2.4%",  "0%_",   "0%-",   "0%=",   "1.4%..",  ]) 
+.range([
+"#033800", "#208820", "#78D070", "#C0E8A0", "#C4C4C4", "#939393", "#4A4A4A", "#000000",
+"#033800", "#208820", "#78D070", "#C0E8A0", "#C4C4C4", "#939393", "#4A4A4A", "#000000", 
+"#033800", "#208820", "#78D070", "#C0E8A0", "#C4C4C4", "#939393", "#4A4A4A", "#000000"
+])'
+sankey_W2 <- sankeyNetwork(Links = links, 
+              Nodes = node_W2,
+              Source = "source", Target = "target",
+              Value = "values", NodeID = "frac_lab", 
+              fontSize = 16, fontFamily = "Arial",
+              nodeWidth = 40, iterations = 0, colourScale = node_color, 
+              sinksRight = FALSE, width = 800, height = 500)
+sankey_W2
+saveNetwork(sankey_W2, "../figure/Sankey diagram_W2.html")
+```
+
+### sankey diagram-Treated in Wave-3
+
+```{r}
+#nodes
+node_W3 <- df_heating %>% 
+  filter(ban_status == "Treated in Wave-3") %>% 
+  select(hh_id, wave, Heat) %>% 
+  mutate(wave = paste0("Wave-", wave), 
+         Heat = case_when(Heat == "Electricity" ~ "1-Electricity", 
+                          Heat == "Coal+Electricity" ~ "2-Coal+Electricity", 
+                          Heat == "Wood+Electricity" ~ "3-Wood+Electricity", 
+                          Heat == "Wood+Coal+Electricity" ~ "4-Wood+Coal+Electricity", 
+                          Heat == "Coal" ~ "5-Coal", 
+                          Heat == "Wood" ~ "6-Wood", 
+                          Heat == "Wood+Coal" ~ "7-Wood+Coal", 
+                          Heat == "No heating" ~ "8-No heating")) %>% 
+  group_by(wave, Heat) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>% 
+  left_join(df_heating %>% 
+              filter(ban_status == "Treated in Wave-3") %>% 
+              select(hh_id, wave, Heat) %>% 
+              mutate(wave = paste0("Wave-", wave)) %>% 
+              group_by(wave) %>% 
+              summarise(all = n()) %>% 
+              ungroup(), 
+            by = "wave") %>% 
+  mutate(frac = as.numeric(n/all*100), 
+         frac = round(frac, 1),
+         frac_lab = paste0(frac, "%"), 
+         frac_lab = case_when(wave == "Wave-2" & Heat == "5-Coal" ~ "7.5%-",
+                              wave == "Wave-4" & Heat == "4-Wood+Coal+Electricity" ~ "0.7%_",
+                              TRUE ~ frac_lab)) %>% 
+  add_row(wave = "Wave-2", Heat="6-Wood", n =0, all = 0, frac = 0, frac_lab = "0%") %>% 
+  add_row(wave = "Wave-4", Heat="5-Coal", n =0, all = 0, frac = 0, frac_lab = "0%.") %>% 
+  add_row(wave = "Wave-4", Heat="6-Wood", n =0, all = 0, frac = 0, frac_lab = "0%_") %>% 
+  add_row(wave = "Wave-4", Heat="7-Wood+Coal", n =0, all = 0, frac = 0, frac_lab = "0%-") %>% 
+  add_row(wave = "Wave-4", Heat="8-No heating", n =0, all = 0, frac = 0, frac_lab = "0%=") %>% 
+  arrange(wave, Heat)
+
+links <- read_csv("../data_processed/sankey_links_fuel_type.csv") %>% 
+                filter(status == "Treated in Wave-3") 
+
+node_color <- 'd3.scaleOrdinal() 
+.domain(["0.7%",   "13%",    "14.4%",  "22.6%",  "13.7%",  "1.4%",   "30.8%",  "3.4%",  
+         "7.5%",   "13.6%",  "12.9%",  "38.8%",  "7.5%-",  "0%", "17%",    "2.7%",  
+         "34.5%",  "2.1%",   "62.7%",  "0.7%_", "0%.",   "0%_",   "0%-",   "0%=",  ]) 
+.range([
+"#033800", "#208820", "#78D070", "#C0E8A0", "#C4C4C4", "#939393", "#4A4A4A", "#000000",
+"#033800", "#208820", "#78D070", "#C0E8A0", "#C4C4C4", "#939393", "#4A4A4A", "#000000", 
+"#033800", "#208820", "#78D070", "#C0E8A0", "#C4C4C4", "#939393", "#4A4A4A", "#000000"
+])'
+sankey_W3 <- sankeyNetwork(Links = links, 
+              Nodes = node_W3,
+              Source = "source", Target = "target",
+              Value = "values", NodeID = "frac_lab", 
+              fontSize = 16, fontFamily = "Arial",
+              nodeWidth = 40, iterations = 0, colourScale = node_color, 
+              sinksRight = FALSE, width = 800, height = 500)
+sankey_W3
+saveNetwork(sankey_W3, "../figure/Sankey diagram_W3.html")
+```
+
+### sankey diagram-Treated in Wave-4
+
+```{r}
+#nodes
+node_W4 <- df_heating %>% 
+  filter(ban_status == "Treated in Wave-4") %>% 
+  select(hh_id, wave, Heat) %>% 
+  mutate(wave = paste0("Wave-", wave), 
+         Heat = case_when(Heat == "Electricity" ~ "1-Electricity", 
+                          Heat == "Coal+Electricity" ~ "2-Coal+Electricity", 
+                          Heat == "Wood+Electricity" ~ "3-Wood+Electricity", 
+                          Heat == "Wood+Coal+Electricity" ~ "4-Wood+Coal+Electricity", 
+                          Heat == "Coal" ~ "5-Coal", 
+                          Heat == "Wood" ~ "6-Wood", 
+                          Heat == "Wood+Coal" ~ "7-Wood+Coal", 
+                          Heat == "No heating" ~ "8-No heating")) %>% 
+  group_by(wave, Heat) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>% 
+  left_join(df_heating %>% 
+              filter(ban_status == "Treated in Wave-4") %>% 
+              select(hh_id, wave, Heat) %>% 
+              mutate(wave = paste0("Wave-", wave)) %>% 
+              group_by(wave) %>% 
+              summarise(all = n()) %>% 
+              ungroup(), 
+            by = "wave") %>% 
+  mutate(frac = as.numeric(n/all*100), 
+         frac = round(frac, 1),
+         frac_lab = paste0(frac, "%"), 
+         frac_lab = case_when(wave == "Wave-1" & Heat == "3-Wood+Electricity" ~ "4%.",
+                              wave == "Wave-2" & Heat == "3-Wood+Electricity" ~ "5%.",
+                              wave == "Wave-2" & Heat == "5-Coal" ~ "6.7%-",
+                              wave == "Wave-4" & Heat == "7-Wood+Coal" ~ "1.7%.",
+                              TRUE ~ frac_lab)) %>% 
+  add_row(wave = "Wave-1", Heat="1-Electricity", n =0, all = 0, frac = 0, frac_lab = "0%") %>% 
+  add_row(wave = "Wave-1", Heat="5-Coal", n =0, all = 0, frac = 0, frac_lab = "0%.") %>% 
+  add_row(wave = "Wave-1", Heat="8-No heating", n =0, all = 0, frac = 0, frac_lab = "0%_") %>% 
+  add_row(wave = "Wave-2", Heat="1-Electricity", n =0, all = 0, frac = 0, frac_lab = "0%..") %>%
+  add_row(wave = "Wave-2", Heat="8-No heating", n =0, all = 0, frac = 0, frac_lab = "0%__") %>%
+  add_row(wave = "Wave-4", Heat="5-Coal", n =0, all = 0, frac = 0, frac_lab = "0%^") %>% 
+  add_row(wave = "Wave-4", Heat="6-Wood", n =0, all = 0, frac = 0, frac_lab = "0%+") %>% 
+  add_row(wave = "Wave-4", Heat="8-No heating", n =0, all = 0, frac = 0, frac_lab = "0%=") %>% 
+  arrange(wave, Heat)
+
+links <- read_csv("../data_processed/sankey_links_fuel_type.csv") %>% 
+                filter(status == "Treated in Wave-4") 
+
+node_color <- 'd3.scaleOrdinal() 
+.domain(["0%",    "14%",   "4%.",    "52%",   "0%.",   "4%",    "26%",   "0%_", 
+         "0%..",    "5%",    "5%.",    "35%",   "6.7%-",  "6.7%",  "41.7%", "0%__", 
+         "13.6%", "1.7%",  "78%",   "5.1%",  "0%^",   "0%+",   "1.7%.", "0%=",  ]) 
+.range([
+"#033800", "#208820", "#78D070", "#C0E8A0", "#C4C4C4", "#939393", "#4A4A4A", "#000000",
+"#033800", "#208820", "#78D070", "#C0E8A0", "#C4C4C4", "#939393", "#4A4A4A", "#000000", 
+"#033800", "#208820", "#78D070", "#C0E8A0", "#C4C4C4", "#939393", "#4A4A4A", "#000000"
+])'
+sankey_W4 <- sankeyNetwork(Links = links, 
+              Nodes = node_W4,
+              Source = "source", Target = "target",
+              Value = "values", NodeID = "frac_lab", 
+              fontSize = 16, fontFamily = "Arial",
+              nodeWidth = 40, iterations = 0, colourScale = node_color, 
+              sinksRight = FALSE, width = 800, height = 500)
+sankey_W4
+saveNetwork(sankey_W4, "../figure/Sankey diagram_W4.html")
+```
+
+## Fuel consumption
+
+```{r}
+df_fuel_consumption <- df_energy %>% 
+  dplyr::filter(wave == 1 & hh_id != "HH20180293") %>% #HH20180293 in Wave-1 use 150 ton of coal for heating, which is impossible
+  dplyr::bind_rows(df_energy %>% 
+                     filter(wave != 1)) %>% 
+  dplyr::mutate(treatment_village = 
+                  case_when(wave == "1" ~ "Untreated", 
+                            wave == "2" & ban_status_composite == 0 ~ "Untreated", 
+                            wave == "2" & ban_status_composite == 1 ~ "Treated", 
+                            wave == "2" & ban_status_composite == 2 ~ "Untreated", 
+                            wave == "2" & ban_status_composite == 3 ~ "Untreated", 
+                            wave == "4" & ban_status_composite == 0 ~ "Untreated", 
+                            wave == "4" & ban_status_composite == 1 ~ "Treated", 
+                            wave == "4" & ban_status_composite == 2 ~ "Treated", 
+                            wave == "4" & ban_status_composite == 3 ~ "Treated"), 
+                Quantity_Briquettes = ifelse(is.na(Quantity_Briquettes), 0, Quantity_Briquettes), 
+                Quantity_Wood = ifelse(is.na(Quantity_Wood), 0, Quantity_Wood/1000), 
+                Quantity_Honeycomb_coal = ifelse(is.na(Quantity_Honeycomb_coal), 0, 
+                                                 Quantity_Honeycomb_coal), 
+                Quantity_coal = ifelse(is.na(Quantity_coal), 0, Quantity_coal),
+                Quantity_coal = Quantity_Briquettes + Quantity_coal) %>%
+  dplyr::select(wave, ban_status, treatment_village, Quantity_Briquettes, Quantity_coal, Quantity_Honeycomb_coal, Quantity_Wood, ELE_winter_est) %>% 
+  tidyr::pivot_longer(c(Quantity_coal, Quantity_Honeycomb_coal, Quantity_Wood, ELE_winter_est), 
+                      names_to  = "Fuel", 
+                      values_to = "quantity") %>% 
+  dplyr::filter(!is.na(quantity)) %>% 
+  dplyr::mutate(Fuel = case_when(Fuel == "Quantity_coal" ~ "Coal (ton)", 
+                                 Fuel == "Quantity_Honeycomb_coal" ~ "Honeycomb coal (chunk)", 
+                                 Fuel == "Quantity_Wood" ~ "Wood (ton)", 
+                                 Fuel == "ELE_winter_est" ~ "Electricity (\u00D71000 RMB)"))
+
+lower_ci <- function(mean, se, n, conf_level = 0.95){
+  lower_ci <- mean - qt(1 - ((1 - conf_level) / 2), n - 1) * se
+}
+upper_ci <- function(mean, se, n, conf_level = 0.95){
+  upper_ci <- mean + qt(1 - ((1 - conf_level) / 2), n - 1) * se
+}
+
+summary_energy_use <- df_fuel_consumption %>%
+  group_by(wave, ban_status, treatment_village, Fuel) %>%
+  summarise(energy_mean = mean(quantity), 
+            energy_sd = sd(quantity), 
+            energy_count = n()) %>% 
+  mutate(se = energy_sd / sqrt(energy_count),
+         lower_ci = lower_ci(energy_mean, se, energy_count),
+         upper_ci = upper_ci(energy_mean, se, energy_count)) %>% 
+  ungroup()
+summary_energy_use
+
+sum_sample_size <- df_fuel_consumption %>%
+  filter(quantity > 0) %>% 
+  group_by(wave, ban_status, treatment_village, Fuel) %>%
+  summarise(n = n())
+
+summary_energy_use %>% 
+  left_join(sum_sample_size, 
+            by = c("wave", "ban_status", "treatment_village", "Fuel")) %>% 
+  mutate(wave = case_when(wave == 1 ~ "Wave 1", 
+                          wave == 2 ~ "Wave 2", 
+                          wave == 4 ~ "Wave 4"), 
+         ban_status = case_when(ban_status == "Untreated" ~ "Untreated", 
+                                ban_status == "Treated in Wave-2" ~ "Treated Wave 2", 
+                                ban_status == "Treated in Wave-3" ~ "Treated Wave 3", 
+                                ban_status == "Treated in Wave-4" ~ "Treated Wave 4"), 
+         ban_status = factor(ban_status, 
+                             levels = c("Untreated", 
+                                        "Treated Wave 2", 
+                                        "Treated Wave 3", 
+                                        "Treated Wave 4")), 
+         treatment_village = factor(summary_energy_use$treatment_village, 
+                                    levels = c("Untreated", "Treated")), 
+         energy_mean = case_when(Fuel == "Electricity (\u00D71000 RMB)" ~ energy_mean/1000, 
+                                 TRUE ~ energy_mean), 
+         upper_ci = case_when(Fuel == "Electricity (\u00D71000 RMB)" ~ upper_ci/1000, 
+                                 TRUE ~ upper_ci), 
+         Fuel = factor(summary_energy_use$Fuel, 
+                       levels = c("Coal (ton)", "Honeycomb coal (chunk)", 
+                                  "Wood (ton)", "Electricity (\u00D71000 RMB)"))) %>% 
+  ggplot(aes(x = ban_status, y = energy_mean, 
+             color = treatment_village, 
+             pattern = wave)) + 
+  geom_bar_pattern(stat = "identity", width = 0.5, position=position_dodge(0.6), 
+                   aes(pattern_angle = wave, color = treatment_village, 
+                       fill = treatment_village), 
+                   pattern_color="white", 
+                   pattern_fill = "white",
+                   pattern_density = 0.5,
+                   pattern_spacing = 0.025,
+                   pattern_key_scale_factor = 0.5) + 
+  geom_errorbar(aes(ymin= energy_mean, ymax = upper_ci), stat = "identity",
+                position=position_dodge(0.6), 
+                size = 0.7, width = 0.3) + 
+  geom_text(aes(label = n, y = upper_ci), color = "black", size = 3.5, 
+            position=position_dodge(width=0.6), vjust=-0.2) + 
+  facet_wrap(~ Fuel, nrow = 1, scales = "free_y") + 
+  scale_color_manual(values=c("#3c3c3c", "#74c476")) + 
+  scale_fill_manual(values=c("#3c3c3c", "#74c476")) + 
+  scale_pattern_manual(values = c("none", "stripe", "stripe", "stripe")) +
+  scale_pattern_angle_manual(values = c(0, 0, 45, -45)) +
+  theme_bw() + 
+  theme(panel.spacing.x = unit(0.3,"line"), 
+        strip.text = element_text(size = 16), 
+        strip.background = element_rect(color="black", fill = "white", 
+                                        linewidth =0.8, linetype="solid"), 
+        axis.title = element_text(size=16, color="black"),
+        axis.text.x = element_text(size = 14, color = "black", angle = 15, hjust = 1, vjust = 1), 
+        axis.text.y = element_text(size = 16, color = "black"), 
+        panel.border = element_rect(linewidth = 1, colour = "black"), 
+        axis.ticks.length = unit(0.15, "cm"), 
+        axis.ticks = element_line(color = "black", linewidth = 0.6), 
+        legend.position = "top", 
+        legend.background = element_blank(), 
+        legend.title = element_blank(), 
+        legend.key.size = unit(0.8, "cm"), 
+        legend.text = element_text(size = 16, color = "black"), 
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_line(linetype = "dashed", color = "grey"), 
+        panel.grid.minor = element_blank()) + 
+  labs(x = "Cohort", y = "Quantity")
+ggsave("../figure/energy consumption.png", width = 15, height = 5)
+
+```
+
+```{r}
+df_fuel_consumption %>% 
+  filter(ban_status != "Untreated", 
+         Fuel == "Electricity (×1000 RMB)") %>% 
+  group_by(treatment_village) %>%
+  summarise(energy_mean = mean(quantity), 
+            energy_sd = sd(quantity), 
+            energy_count = n()) %>% 
+  mutate(se = energy_sd / sqrt(energy_count),
+         lower_ci = lower_ci(energy_mean, se, energy_count),
+         upper_ci = upper_ci(energy_mean, se, energy_count)) %>% 
+  ungroup()
+
+```
+
+# 2. Air pollution bar plot-indoor and personal
+
+## Identify data subset
+
+```{r}
+df_master_pm <- df_master %>% 
+  dplyr::select(hh_id, wave, ban_status_composite, PM25conc_exposureugm3,	p_usable_pm) %>% 
+  dplyr::filter(p_usable_pm == 1) %>% 
+  dplyr::mutate(pollutants = "Personal filter-based PM2.5") %>% 
+  dplyr::rename(conc = PM25conc_exposureugm3, 
+                usable = p_usable_pm) %>% 
+  dplyr::bind_rows(df_master %>% 
+                     select(hh_id, wave, ban_status_composite, 
+                            BCconc_exposureugm3,	p_usable_bc) %>% 
+                     filter(p_usable_bc == 1) %>% 
+                     mutate(pollutants = "Personal filter-based BC") %>% 
+                     rename(conc = BCconc_exposureugm3, 
+                            usable = p_usable_bc)) %>% 
+    dplyr::bind_rows(df_master %>% 
+                       select(hh_id, wave, ban_status_composite, 
+                              PM25_indoor_filter, if_usable_pm) %>% 
+                       filter(if_usable_pm == 1) %>% 
+                       distinct(hh_id, wave, ban_status_composite, 
+                              PM25_indoor_filter, if_usable_pm) %>% 
+                       mutate(pollutants = "Indoor filter-based PM2.5") %>% 
+                       rename(conc = PM25_indoor_filter, 
+                                     usable = if_usable_pm)) %>% 
+    dplyr::bind_rows(df_master %>% 
+                       select(hh_id, wave, ban_status_composite, 
+                              BC_indoor_conc,	if_usable_bc) %>% 
+                       filter(if_usable_bc == 1) %>% 
+                       distinct(hh_id, wave, ban_status_composite, 
+                              BC_indoor_conc,	if_usable_bc) %>% 
+                       mutate(pollutants = "Indoor filter-based BC") %>% 
+                       rename(conc = BC_indoor_conc, 
+                              usable = if_usable_bc)) %>% 
+    dplyr::bind_rows(df_master %>% 
+                       select(hh_id, wave, ban_status_composite, PM25_indoor_24h_sensor) %>% 
+                       filter(!is.na(PM25_indoor_24h_sensor)) %>% 
+                       distinct(hh_id, wave, ban_status_composite, PM25_indoor_24h_sensor) %>% 
+                       mutate(pollutants = "Indoor sensor-based 24-h PM2.5", 
+                              usable = 1) %>% 
+                       rename(conc = PM25_indoor_24h_sensor)) %>% 
+    dplyr::bind_rows(df_master %>% 
+                       select(hh_id, wave, ban_status_composite, PM25_indoor_seasonal_hs,	
+                              n_percent_indoor_seasonal_hs) %>% 
+                       filter(n_percent_indoor_seasonal_hs >= 0.2) %>% 
+                       distinct(hh_id, wave, ban_status_composite, PM25_indoor_seasonal_hs,	
+                              n_percent_indoor_seasonal_hs) %>% 
+                       mutate(pollutants = "Indoor sensor-based seasonal PM2.5", 
+                              usable = 1) %>% 
+                       select(-n_percent_indoor_seasonal_hs) %>% 
+                       rename(conc = PM25_indoor_seasonal_hs)) %>% 
+  dplyr::mutate(wave = case_when(wave == "1" ~ "Wave 1", 
+                                 wave == "2" ~ "Wave 2", 
+                                 wave == "4" ~ "Wave 4"),  
+                ban_status = case_when(ban_status_composite == 0 ~ "Untreated", 
+                                       ban_status_composite == 1 ~ "Treated Wave 2", 
+                                       ban_status_composite == 2 ~ "Treated Wave 3", 
+                                       ban_status_composite == 3 ~ "Treated Wave 4"), 
+                treatment_village = 
+                  case_when(wave == "Wave 1" ~ "Untreated", 
+                            wave == "Wave 2" & ban_status_composite == 0 ~ "Untreated", 
+                            wave == "Wave 2" & ban_status_composite == 1 ~ "Treated", 
+                            wave == "Wave 2" & ban_status_composite == 2 ~ "Untreated", 
+                            wave == "Wave 2" & ban_status_composite == 3 ~ "Untreated", 
+                            wave == "Wave 4" & ban_status_composite == 0 ~ "Untreated", 
+                            wave == "Wave 4" & ban_status_composite == 1 ~ "Treated", 
+                            wave == "Wave 4" & ban_status_composite == 2 ~ "Treated", 
+                            wave == "Wave 4" & ban_status_composite == 3 ~ "Treated"))
+```
+
+## Plot
+
+```{r}
+#gm.ci fuction
+ci.gml <- function(x){
+  gm1 = mean(log(x), na.rm = T)
+  cil = exp(gm1-(1.96*(sd(log(x), na.rm = T)/sqrt(length(x)))))
+  vec = c(round(cil,2))
+  return (vec)
+}
+
+ci.gmupp <- function(x){
+  gm1 = mean(log(x), na.rm = T)
+  ciupp = exp(gm1+(1.96*(sd(log(x), na.rm = T)/sqrt(length(x)))))
+  vec = c(round(ciupp,2))
+  return (vec)
+}
+#
+df_master_pm_summary <- df_master_pm %>%
+  group_by(wave, treatment_village, ban_status, pollutants) %>%
+  summarise(pm_gm = Gmean(conc), 
+            pm_cil = ci.gml(conc), 
+            pm_ciupp = ci.gmupp(conc))
+df_master_pm_summary
+
+df_master_pm_summary %>% 
+  mutate(ban_status = factor(ban_status, 
+                                 levels = c("Untreated", 
+                                            "Treated Wave 2", 
+                                            "Treated Wave 3", 
+                                            "Treated Wave 4")), 
+         treatment_village = factor(treatment_village, levels = c("Treated", "Untreated")), 
+         pollutants = factor(pollutants, levels = c("Personal filter-based PM2.5", 
+                                                    "Personal filter-based BC", 
+                                                    "Indoor filter-based PM2.5", 
+                                                    "Indoor filter-based BC", 
+                                                    "Indoor sensor-based 24-h PM2.5", 
+                                                    "Indoor sensor-based seasonal PM2.5"))) %>% 
+  mutate(pm_gm = as.numeric(pm_gm), 
+         pm_cil = as.numeric(pm_cil), 
+         pm_ciupp = as.numeric(pm_ciupp)) %>% 
+  ggplot(aes(x=wave, y=pm_gm, group=ban_status, color=treatment_village, fill=treatment_village)) + 
+  geom_bar(stat = "identity", width=0.4, position=position_dodge(0.7))+
+  geom_errorbar(aes(ymin = pm_cil, ymax = pm_ciupp), 
+                size = 1, position=position_dodge(0.7), width = 0.2) + 
+  guides(x = ggh4x::guide_axis_nested(delim = ".", extend = 0)) + 
+  facet_nested_wrap(~ pollutants + ban_status, nrow = 3, scales = "free_y") + 
+  scale_color_manual(values=c("#74c476", "#3c3c3c")) + 
+  scale_fill_manual(values=c("#74c476", "#3c3c3c")) + 
+  theme_bw() + 
+  theme(panel.spacing.x = unit(0.3,"line"), 
+        strip.text = element_text(size = 16), 
+        strip.background = element_rect(color="black", fill = "white", size=0.8, linetype="solid"), 
+        axis.title = element_text(size=16, color="black"),
+        axis.text.x = element_text(size = 14, color = "black", vjust = 0.85, hjust = 0.85, angle = 20), 
+        axis.text.y = element_text(size = 16, color = "black"), 
+        panel.border = element_rect(size = 1, colour = "black"),
+        axis.ticks.length = unit(0.15, "cm"), 
+        axis.ticks = element_line(color = "black", linewidth = 0.6), 
+        legend.position = "top", 
+        legend.background = element_blank(), 
+        legend.title = element_blank(), 
+        legend.key.size = unit(0.8, "cm"), 
+        legend.text = element_text(size = 16, color = "black"), 
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_line(linetype = "dashed", color = "grey"), 
+        panel.grid.minor = element_blank()) + 
+  labs(x = "Wave", y = bquote(Geometric~mean~concentration~'(μg' ~ m^-3*')'))
+ggsave("../figure/air pollution_barplot.png", width = 19.6, height = 9)
+
+```
+
+## Statistics
+
+```{r}
+df_master_pm %>%
+  group_by(wave, pollutants, ban_status) %>%
+  summarise(pm_gm = Gmean(conc)) %>% 
+  pivot_wider(names_from = wave, 
+              values_from = pm_gm) %>% 
+  mutate(delta_1 = `Wave 2` - `Wave 1`, 
+         delta_2 = `Wave 4` - `Wave 2`, 
+         p1 = (delta_1/`Wave 1`)*100, 
+         p2 = (delta_2/`Wave 2`)*100)
+
+```
+
+## BC/PM2.5 ratio
+
+```{r}
+#personal
+df_BC_ratio <- df_master_pm %>% 
+  filter(pollutants %in% c("Personal filter-based PM2.5", "Personal filter-based BC")) %>% 
+  #select(hh_id, wave, pollutants, conc) %>% 
+  pivot_wider(names_from = "pollutants",
+              values_from = "conc") %>% 
+  rename(PM2.5 = `Personal filter-based PM2.5`, 
+         BC = `Personal filter-based BC`) %>% 
+  mutate(ratio = BC/PM2.5, 
+         measure = "Personal") %>% 
+  bind_rows(df_master_pm %>% 
+              filter(pollutants %in% c("Indoor filter-based PM2.5", 
+                                       "Indoor filter-based BC")) %>% 
+              pivot_wider(names_from = "pollutants", 
+                          values_from = "conc") %>% 
+              rename(PM2.5 = `Indoor filter-based PM2.5`, 
+                     BC = `Indoor filter-based BC`) %>% 
+              mutate(ratio = BC/PM2.5, 
+                     measure = "Indoor"))
+
+df_BC_ratio_summary <- df_BC_ratio %>% 
+  filter(!is.na(ratio), 
+         ratio < 1) %>% 
+  group_by(wave, treatment_village, ban_status, measure) %>%
+  summarise(ratio_m = mean(ratio),
+            ratio_sd = sd(ratio),
+            ratio_n = n()) %>%
+  mutate(ratio_se = ratio_sd / sqrt(ratio_n),
+         ratio_cil = ratio_m - qt(1 - (0.05 / 2), ratio_n - 1) * ratio_se,
+         ratio_ciupp = ratio_m + qt(1 - (0.05 / 2), ratio_n - 1) * ratio_se)
+
+df_BC_ratio_summary
+
+df_BC_ratio_summary %>% 
+  mutate(ban_status = factor(ban_status, 
+                                 levels = c("Untreated", 
+                                            "Treated Wave 2", 
+                                            "Treated Wave 3", 
+                                            "Treated Wave 4")), 
+         treatment_village = factor(treatment_village, levels = c("Treated", "Untreated")), 
+         measure = factor(measure, levels = c("Personal", "Indoor"))) %>% 
+  ggplot(aes(x=wave, y=ratio_m, group=ban_status, color=treatment_village, 
+             fill=treatment_village)) + 
+  geom_bar(stat = "identity", width=0.4, position=position_dodge(0.7))+
+  geom_errorbar(aes(ymin = ratio_cil, ymax = ratio_ciupp), 
+                size = 1, position=position_dodge(0.7), width = 0.2) + 
+  facet_grid(measure ~ ban_status, scales = "free_y") + 
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) + 
+  scale_color_manual(values=c("#74c476", "#3c3c3c")) + 
+  scale_fill_manual(values=c("#74c476", "#3c3c3c")) + 
+  theme_bw() + 
+  theme(panel.spacing.x = unit(0.3,"line"), 
+        strip.text = element_text(size = 12), 
+        strip.background = element_rect(color="black", fill = "white", size=0.8, linetype="solid"), 
+        axis.title = element_text(size=12, color="black"),
+        axis.text.x = element_text(size = 10, color = "black"), 
+        axis.text.y = element_text(size = 12, color = "black"), 
+        panel.border = element_rect(size = 1, colour = "black"),
+        axis.ticks.length = unit(0.15, "cm"), 
+        axis.ticks = element_line(color = "black", linewidth = 0.6), 
+        legend.position = "top", 
+        legend.background = element_blank(), 
+        legend.title = element_blank(), 
+        legend.key.size = unit(0.8, "cm"), 
+        legend.text = element_text(size = 12, color = "black"), 
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_line(linetype = "dashed", color = "grey"), 
+        panel.grid.minor = element_blank()) + 
+  labs(x = "Wave", y = bquote(BC/PM[2.5]))
+ggsave("../figure/PM2.5 ratio_barplot.png", width = 9, height = 5)
+
+```
+
+# Air pollution bar plot-outdoor !NEW!
+
+## Identify data subset
+
+```{r}
+# outdoor BC
+village_number <- tibble(village = unique(outdoor_daily$village), ID_VILLAGE = 1:51)
+
+df_master_outdoor_bc <- mass_master %>% 
+  # filter to outdoor samples that are usable
+  filter(sample_type == "sample") %>% 
+  filter(filter_location == "outdoor") %>% 
+  filter(usable == 1) %>% 
+  select(filter_id, village, start_date, end_date, wave, pm_conc) %>% 
+  # join to ban status and rename
+  left_join(ban_status, by = c("village")) %>% 
+  mutate(ban_enter = case_when(ban_s2 == 1 ~ "treated in year 2",
+                               ban_s3 == 1 ~ "treated in year 3",
+                               village == "Nianziwan" ~ "treated in year 3",
+                               ban_s4 == 1 ~ "treated in year 4",
+                               TRUE ~ "untreated"),
+         treatment_year = case_when(ban_enter == "untreated" ~ -Inf,
+                               ban_enter == "treated in year 2" ~ 2019,
+                               ban_enter == "treated in year 3" ~ 2020,
+                               ban_enter == "treated in year 4" ~ 2021),
+         treatment = case_when(ban_enter == "treated in year 2" & wave >= 2 ~ 1,
+                              ban_enter == "treated in year 3" & wave >= 3 ~ 1,
+                              ban_enter == "treated in year 4" & wave >= 4 ~ 1,
+                              TRUE ~ 0),
+         field_year = case_when(wave == 1 ~ 2018, 
+                                       wave == 2 ~ 2019, 
+                                       wave == 4 ~ 2021)) %>% 
+  select(-ban_s1, -ban_s2, -ban_s3, -ban_s4) %>% 
+  # expand to get all days filter was collected for met
+  group_by(filter_id, village, district, wave, pm_conc, ban_enter, field_year,
+           treatment_year, treatment) %>% 
+  tidyr::expand(date = seq(start_date, end_date, "day")) %>% 
+  # join in met
+  left_join(met_daily, by = c("village", "date", "wave")) %>% 
+  # take average met
+  ungroup() %>% 
+  group_by(filter_id, village, district, wave, pm_conc, ban_enter, field_year,
+           treatment_year, treatment) %>% 
+  summarise(ws = mean(ws),
+            temp = mean(temp),
+            blh = mean(blh),
+            wdir = mean(wdir),
+            rh = mean(rh),
+            # recode wdir to be north or south
+            wdir_dir = case_when(wdir > 0 & wdir < 90 ~ "N",
+                                 wdir > 270 & wdir <= 360 ~ "N",
+                                 wdir >= 90 & wdir < 270 ~ "S")) %>% 
+  # join in other covariates
+  left_join(master_covars_outdoor) %>% 
+  left_join(bc) %>% 
+  filter(bc_m3 > 0) %>% 
+  mutate(treatment_year_2019 = case_when(ban_enter == "treated in year 2" ~ 1,
+                                       TRUE ~ 0),
+         treatment_year_2020 = case_when(ban_enter == "treated in year 3" ~ 1,
+                                       TRUE ~ 0),
+         treatment_year_2021 = case_when(ban_enter == "treated in year 4" ~ 1,
+                                       TRUE ~ 0),
+         field_year_2019 = case_when(wave == 2 ~ 1,
+                                    TRUE ~ 0),
+         field_year_2021 = case_when(wave == 4 ~ 1,
+                                    TRUE ~ 0)) %>% 
+  select(filter_id, village,  district, field_year, ban_enter, treatment_year, treatment,
+         treatment_year_2019, treatment_year_2020, treatment_year_2021, field_year_2019,
+         field_year_2021, pm_conc, bc_m3, ws, temp, blh, wdir, wdir_dir, rh, mean_home_heat, 
+         n_hh, n_pop) %>% 
+    left_join(village_number)
+
+# outdoor sensor seasonal
+df_master_outdoor_sensor_seasonal_pm <- outdoor_daily %>% 
+  # join in other covariates
+  left_join(master_covars_outdoor) %>% 
+  mutate(ban_enter = case_when(ban_s2 == 1 ~ "treated in year 2",
+                               ban_s3 == 1 ~ "treated in year 3",
+                               village == "Nianziwan" ~ "treated in year 3",
+                               ban_s4 == 1 ~ "treated in year 4",
+                               TRUE ~ "untreated"),
+         treatment_year = case_when(ban_enter == "untreated" ~ -Inf,
+                               ban_enter == "treated in year 2" ~ 2019,
+                               ban_enter == "treated in year 3" ~ 2020,
+                               ban_enter == "treated in year 4" ~ 2021),
+         treatment = case_when(ban_enter == "treated in year 2" & wave >= 2 ~ 1,
+                              ban_enter == "treated in year 3" & wave >= 3 ~ 1,
+                              ban_enter == "treated in year 4" & wave >= 4 ~ 1,
+                              TRUE ~ 0),
+         field_year = case_when(wave == 1 ~ 2018, 
+                                       wave == 2 ~ 2019, 
+                                       wave == 4 ~ 2021)) %>% 
+  group_by(village, district, ban_enter, treatment_year, treatment, field_year, wave) %>% 
+  summarise(pm2.5 = mean(pm2.5, na.rm = TRUE),
+            rh = mean(rh, na.rm = TRUE),
+            ws = mean(ws, na.rm = TRUE),
+            blh = mean(blh, na.rm = TRUE),
+            temp = mean(temp, na.rm = TRUE),
+            wdir = mean(wdir, na.rm = TRUE),
+            n_hh = mean(n_hh, na.rm = TRUE),
+            n_pop = mean(n_pop, na.rm = TRUE)) %>% 
+  filter(!is.na(district)) %>% 
+  select(village, district, pm2.5, ban_enter, treatment_year, treatment, field_year,
+         wave, rh, ws, blh, temp, wdir, n_hh, n_pop) %>% 
+  left_join(village_number) %>% 
+  filter(!is.na(district)) %>% 
+   mutate(treatment_year_2019 = case_when(ban_enter == "treated in year 2" ~ 1,
+                                       TRUE ~ 0),
+         treatment_year_2020 = case_when(ban_enter == "treated in year 3" ~ 1,
+                                       TRUE ~ 0),
+         treatment_year_2021 = case_when(ban_enter == "treated in year 4" ~ 1,
+                                       TRUE ~ 0),
+         field_year_2019 = case_when(wave == 2 ~ 1,
+                                    TRUE ~ 0),
+         field_year_2021 = case_when(wave == 4 ~ 1,
+                                    TRUE ~ 0))
+
+
+df_outdoor_bc_summary <- df_master_outdoor_bc %>%
+  mutate(wave = case_when(wave == 1 ~ "Wave 1",
+                          wave == 2 ~ "Wave 2",
+                          wave == 4 ~ "Wave 4"),
+         ban_status = case_when(ban_enter == "untreated" ~ "Untreated",
+                                ban_enter == "treated in year 2" ~ "Treated Wave 2",
+                                ban_enter == "treated in year 3" ~ "Treated Wave 3",
+                                ban_enter == "treated in year 4" ~ "Treated Wave 4"),
+         treatment_village = case_when(wave == "Wave 1" ~ "Untreated",
+                                       wave == "Wave 2" & ban_enter == "untreated" ~ "Untreated",
+                                       wave == "Wave 2" & ban_enter == "treated in year 2" ~ "Treated",
+                                       wave == "Wave 2" & ban_enter == "treated in year 3" ~ "Untreated",
+                                       wave == "Wave 2" & ban_enter == "treated in year 4" ~ "Untreated",
+                                       wave == "Wave 4" & ban_enter == "untreated" ~ "Untreated",
+                                       wave == "Wave 4" & ban_enter == "treated in year 2" ~ "Treated",
+                                       wave == "Wave 4" & ban_enter == "treated in year 3" ~ "Treated",
+                                       wave == "Wave 4" & ban_enter == "treated in year 4" ~ "Treated")) %>% 
+  group_by(wave, treatment_village, ban_status) %>%
+  summarise(pm_gm = Gmean(bc_m3), 
+            pm_cil = ci.gml(bc_m3), 
+            pm_ciupp = ci.gmupp(bc_m3)) %>% 
+  mutate(pollutants = "Outdoor filter-based BC")
+
+
+df_outdoor_seasonal_summary <- df_master_outdoor_sensor_seasonal_pm %>%
+  filter(wave != 3) %>% 
+  mutate(wave = case_when(wave == 1 ~ "Wave 1",
+                          wave == 2 ~ "Wave 2",
+                          wave == 4 ~ "Wave 4"),
+         ban_status = case_when(ban_enter == "untreated" ~ "Untreated",
+                                ban_enter == "treated in year 2" ~ "Treated Wave 2",
+                                ban_enter == "treated in year 3" ~ "Treated Wave 3",
+                                ban_enter == "treated in year 4" ~ "Treated Wave 4"),
+         treatment_village = case_when(wave == "Wave 1" ~ "Untreated",
+                                       wave == "Wave 2" & ban_enter == "untreated" ~ "Untreated",
+                                       wave == "Wave 2" & ban_enter == "treated in year 2" ~ "Treated",
+                                       wave == "Wave 2" & ban_enter == "treated in year 3" ~ "Untreated",
+                                       wave == "Wave 2" & ban_enter == "treated in year 4" ~ "Untreated",
+                                       wave == "Wave 4" & ban_enter == "untreated" ~ "Untreated",
+                                       wave == "Wave 4" & ban_enter == "treated in year 2" ~ "Treated",
+                                       wave == "Wave 4" & ban_enter == "treated in year 3" ~ "Treated",
+                                       wave == "Wave 4" & ban_enter == "treated in year 4" ~ "Treated")) %>% 
+  group_by(wave, treatment_village, ban_status) %>%
+  summarise(pm_gm = Gmean(pm2.5), 
+            pm_cil = ci.gml(pm2.5), 
+            pm_ciupp = ci.gmupp(pm2.5)) %>% 
+  mutate(pollutants = "Outdoor sensor-based seasonal PM2.5")
+
+df_outdoor_summary <- rbind(df_outdoor_seasonal_summary, df_outdoor_bc_summary)
+
+# 
+df_master_outdoor_sensor_seasonal_pm %>% 
+  group_by(wave) %>% 
+  summarise(pm_gm = Gmean(pm2.5), 
+            pm_cil = ci.gml(pm2.5), 
+            pm_ciupp = ci.gmupp(pm2.5))
+
+# numbers for all treated BC(not different)
+df_master_outdoor_bc %>% 
+  filter(ban_enter != "untreated") %>% 
+  ungroup() %>% 
+  summarise(bc_gm = Gmean(bc_m3), 
+            bc_cil = ci.gml(bc_m3), 
+            bc_ciupp = ci.gmupp(bc_m3))
+```
+
+## Plot
+
+```{r}
+df_outdoor_summary %>% 
+  mutate(ban_status = factor(ban_status, 
+                                 levels = c("Untreated", 
+                                            "Treated Wave 2", 
+                                            "Treated Wave 3", 
+                                            "Treated Wave 4")), 
+         treatment_village = factor(treatment_village, levels = c("Treated", "Untreated")), 
+         pollutants = factor(pollutants, levels = c("Outdoor sensor-based seasonal PM2.5", 
+                                                    "Outdoor filter-based BC"))) %>% 
+  ggplot(aes(x=wave, y=pm_gm, group=ban_status, color=treatment_village, fill=treatment_village)) + 
+  geom_bar(stat = "identity", width=0.4, position=position_dodge(0.7))+
+  geom_errorbar(aes(ymin = pm_cil, ymax = pm_ciupp), 
+                size = 1, position=position_dodge(0.7), width = 0.2) + 
+  guides(x = ggh4x::guide_axis_nested(delim = ".", extend = 0)) + 
+  facet_nested_wrap(~ pollutants + ban_status, ncol = 4, scales = "free_y") + 
+  scale_color_manual(values=c("#74c476", "#3c3c3c")) + 
+  scale_fill_manual(values=c("#74c476", "#3c3c3c")) + 
+  theme_bw() + 
+  theme(panel.spacing.x = unit(0.3,"line"), 
+        strip.text = element_text(size = 16), 
+        strip.background = element_rect(color="black", fill = "white", size=0.8, linetype="solid"), 
+        axis.title = element_text(size=16, color="black"),
+        axis.text.x = element_text(size = 16, color = "black"), 
+        axis.text.y = element_text(size = 16, color = "black"), 
+        panel.border = element_rect(size = 1, colour = "black"),
+        axis.ticks.length = unit(0.15, "cm"), 
+        axis.ticks = element_line(color = "black", linewidth = 0.6), 
+        legend.position = "top", 
+        legend.background = element_blank(), 
+        legend.title = element_blank(), 
+        legend.key.size = unit(0.8, "cm"), 
+        legend.text = element_text(size = 16, color = "black"), 
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_line(linetype = "dashed", color = "grey"), 
+        panel.grid.minor = element_blank()) + 
+  labs(x = "Wave", y = bquote(Geometric~mean~concentration~'(μg' ~ m^-3*')'))
+
+ggsave("../figure/outdoor air pollution_barplot.png", width = 14, height = 8)
+```
+
+# 3. Mixed-effect model
+
+## Define subdataset
+
+```{r}
+df_master_mix <- df_master %>% 
+  dplyr::mutate(ban_status = case_when(ban_status_composite == 0 ~ "Untreated", 
+                                       ban_status_composite == 1 ~ "Treated Wave 2", 
+                                       ban_status_composite == 2 ~ "Treated Wave 3", 
+                                       ban_status_composite == 3 ~ "Treated Wave 4"), 
+                treatment_village = 
+                  case_when(wave == "1" ~ "Untreated", 
+                            wave == "2" & ban_status_composite == 0 ~ "Untreated", 
+                            wave == "2" & ban_status_composite == 1 ~ "Treated", 
+                            wave == "2" & ban_status_composite == 2 ~ "Untreated", 
+                            wave == "2" & ban_status_composite == 3 ~ "Untreated", 
+                            wave == "4" & ban_status_composite == 0 ~ "Untreated", 
+                            wave == "4" & ban_status_composite == 1 ~ "Treated", 
+                            wave == "4" & ban_status_composite == 2 ~ "Treated", 
+                            wave == "4" & ban_status_composite == 3 ~ "Treated"), 
+                gender_health = ifelse(gender_health == 1, "Male", "Female"), 
+                Quantity_Briquettes = ifelse(is.na(Quantity_Briquettes), 0, Quantity_Briquettes), 
+                Quantity_Wood = ifelse(is.na(Quantity_Wood), 0, Quantity_Wood/1000), 
+                Quantity_Honeycomb_coal = ifelse(is.na(Quantity_Honeycomb_coal), 0, 
+                                                 Quantity_Honeycomb_coal), 
+                Quantity_coal = ifelse(is.na(Quantity_coal), 0, Quantity_coal),
+                Quantity_coal = Quantity_Briquettes + Quantity_coal, 
+                 ptc_smoking = case_when(smoking == 1 ~ "Current smoker", 
+                                        smoking == 2 ~ "Former smoker", 
+                                        smoking == 3 & lived_with_smoker == 1 ~ "Non-smoker", 
+                                        smoking == 3 & lived_with_smoker == 2 ~ "Non-smoker", 
+                                        smoking == 3 & lived_with_smoker == 3 ~ 
+                                          "Non-smoker living with a current smoker"), 
+                hh_smoking = case_when(smoking == 1 ~ "Current smoker", 
+                                       smoking == 2 ~ "Former smoker", 
+                                       smoking == 3 & lived_with_smoker == 1 ~ "Non-smoker", 
+                                       smoking == 3 & lived_with_smoker == 2 ~ "Former smoker", 
+                                       smoking == 3 & lived_with_smoker == 3 ~ "Current smoker")) %>% 
+  dplyr::select(hh_id, ptc_id, ID_VILLAGE, ID_COUNTY, wave, ban_status, treatment_village, cent_radiator, 
+                Quantity_coal, Quantity_Honeycomb_coal, Quantity_Wood, Quantity_LPG, ELE_winter_est, 
+                gender_health, ptc_smoking, hh_smoking, wealth_index, hh_num,
+                PM25conc_exposureugm3, p_usable_pm, BCconc_exposureugm3, p_usable_bc, 
+                PM25_indoor_filter, if_usable_pm, BC_indoor_conc,	if_usable_bc, 
+                PM25_indoor_24h_sensor, PM25_indoor_seasonal_hs, n_percent_indoor_seasonal_hs, 
+                PM25_outdoor_sensor_24h, PM25_outdoor_seasonal_hs, 
+                out_temp_24h, out_dew_24h, out_temp_season, out_dew_season) %>% 
+  dplyr::left_join(df_heating %>% 
+                     select(hh_id, wave, Heat), 
+                   by = c("hh_id", "wave")) %>% 
+  dplyr::mutate(wave = case_when(wave == "1" ~ "Wave 1", 
+                                 wave == "2" ~ "Wave 2", 
+                                 wave == "4" ~ "Wave 4"))
+```
+
+## Personal PM2.5
+
+```{r}
+df_mix_personal_pm <- df_master_mix %>% 
+  dplyr::filter(p_usable_pm == 1) %>% 
+  dplyr::mutate(ptc_smoking = factor(ptc_smoking, 
+                                     levels = c("Non-smoker", "Former smoker", 
+                                                "Non-smoker living with a current smoker", 
+                                                "Current smoker")), 
+                gender_health = factor(gender_health, levels = c("Male", "Female")), 
+                Heat = factor(Heat, levels = c("Electricity", "Coal+Electricity", "Wood+Electricity", 
+                                               "Wood+Coal+Electricity", "Coal", "Wood", "Wood+Coal", 
+                                               "No heating")))
+
+personalPMFULL <- df_mix_personal_pm[complete.cases(df_mix_personal_pm$wave, 
+                                              df_mix_personal_pm$treatment_village, 
+                                              df_mix_personal_pm$PM25conc_exposureugm3, 
+                                              df_mix_personal_pm$PM25_outdoor_sensor_24h, 
+                                              df_mix_personal_pm$out_temp_24h, 
+                                              df_mix_personal_pm$out_dew_24h, 
+                                              df_mix_personal_pm$Heat, 
+                                              df_mix_personal_pm$wealth_index, 
+                                              df_mix_personal_pm$ptc_smoking, 
+                                              df_mix_personal_pm$hh_num, 
+                                              df_mix_personal_pm$gender_health, 
+                                              df_mix_personal_pm$Quantity_coal, 
+                                              df_mix_personal_pm$Quantity_Wood, 
+                                              df_mix_personal_pm$Quantity_Honeycomb_coal, 
+                                              df_mix_personal_pm$Quantity_LPG, 
+                                              df_mix_personal_pm$ELE_winter_est),]
+
+mod_final <- lmer(log(PM25conc_exposureugm3) ~ log(PM25_outdoor_sensor_24h) + out_temp_24h + 
+                out_dew_24h + wave + Heat + ptc_smoking + wealth_index + 
+                hh_num + gender_health + (1|hh_id), data = personalPMFULL)
+summary(mod_final)
+summ(mod_final, digits =3)
+confint(mod_final)
+
+df_mix_personal_pm %>% 
+  group_by(gender_health) %>% 
+  summarise(pm_gm = Gmean(PM25conc_exposureugm3), 
+            pm_cil = ci.gml(PM25conc_exposureugm3), 
+            pm_ciupp = ci.gmupp(PM25conc_exposureugm3))
+
+```
+
+## Personal BC
+
+```{r}
+df_mix_personal_bc <- df_master_mix %>% 
+  dplyr::filter(p_usable_bc == 1) %>% 
+  dplyr::mutate(ptc_smoking = factor(ptc_smoking, 
+                                     levels = c("Non-smoker", "Former smoker", 
+                                                "Non-smoker living with a current smoker", 
+                                                "Current smoker")), 
+                gender_health = factor(gender_health, levels = c("Male", "Female")), 
+                Heat = factor(Heat, levels = c("Electricity", "Coal+Electricity", "Wood+Electricity", 
+                                               "Wood+Coal+Electricity", "Coal", "Wood", "Wood+Coal", 
+                                               "No heating")))
+
+personalBCFULL <- df_mix_personal_bc[complete.cases(df_mix_personal_bc$wave, 
+                                              df_mix_personal_bc$treatment_village, 
+                                              df_mix_personal_bc$BCconc_exposureugm3, 
+                                              df_mix_personal_bc$PM25_outdoor_sensor_24h, 
+                                              df_mix_personal_bc$out_temp_24h, 
+                                              df_mix_personal_bc$out_dew_24h, 
+                                              df_mix_personal_bc$Heat, 
+                                              df_mix_personal_bc$wealth_index, 
+                                              df_mix_personal_bc$ptc_smoking, 
+                                              df_mix_personal_bc$hh_num, 
+                                              df_mix_personal_bc$gender_health, 
+                                              df_mix_personal_bc$Quantity_coal, 
+                                              df_mix_personal_bc$Quantity_Wood, 
+                                              df_mix_personal_bc$Quantity_Honeycomb_coal, 
+                                              df_mix_personal_bc$Quantity_LPG, 
+                                              df_mix_personal_bc$ELE_winter_est),]
+
+mod_final <- lmer(log(BCconc_exposureugm3) ~ log(PM25_outdoor_sensor_24h) + out_temp_24h + 
+                out_dew_24h + wave + Heat + ptc_smoking + wealth_index + 
+                hh_num + gender_health + (1|hh_id), data = personalBCFULL)
+summary(mod_final)
+summ(mod_final, digits =3)
+confint(mod_final)
+
+```
+
+## Indoor sensor-reported seasonal PM2.5
+
+```{r}
+df_mix_indoor_season <- df_master_mix %>% 
+  dplyr::filter(n_percent_indoor_seasonal_hs >= 0.2) %>% 
+  dplyr::mutate(hh_smoking = factor(hh_smoking, 
+                                     levels = c("Non-smoker", "Former smoker", 
+                                                "Current smoker")), 
+                gender_health = factor(gender_health, levels = c("Male", "Female")), 
+                Heat = factor(Heat, levels = c("Electricity", "Coal+Electricity", "Wood+Electricity", 
+                                               "Wood+Coal+Electricity", "Coal", "Wood", "Wood+Coal", 
+                                               "No heating")))
+
+indoorPMFULL <- df_mix_indoor_season[complete.cases(df_mix_indoor_season$wave, 
+                                              df_mix_indoor_season$treatment_village, 
+                                              df_mix_indoor_season$PM25_indoor_seasonal_hs, 
+                                              df_mix_indoor_season$PM25_outdoor_seasonal_hs, 
+                                              df_mix_indoor_season$out_temp_season, 
+                                              df_mix_indoor_season$out_dew_season, 
+                                              df_mix_indoor_season$Heat, 
+                                              df_mix_indoor_season$wealth_index, 
+                                              df_mix_indoor_season$hh_smoking, 
+                                              df_mix_indoor_season$hh_num, 
+                                              df_mix_indoor_season$Quantity_coal, 
+                                              df_mix_indoor_season$Quantity_Wood, 
+                                              df_mix_indoor_season$Quantity_Honeycomb_coal, 
+                                              df_mix_indoor_season$Quantity_LPG, 
+                                              df_mix_indoor_season$ELE_winter_est),]
+
+mod_final <- lmer(log(PM25_indoor_seasonal_hs) ~ log(PM25_outdoor_seasonal_hs) + out_temp_season + 
+                out_dew_season + wave + Heat + hh_smoking + wealth_index + 
+                hh_num + (1|hh_id), data = indoorPMFULL)
+summary(mod_final)
+summ(mod_final, digits =3)
+confint(mod_final)
+
+```
+
+## Indoor sensor-reported 24-h PM2.5
+
+```{r}
+df_mix_indoor_24h <- df_master_mix %>% 
+  dplyr::filter(!is.na(PM25_indoor_24h_sensor)) %>% 
+  dplyr::mutate(hh_smoking = factor(hh_smoking, 
+                                     levels = c("Non-smoker", "Former smoker", 
+                                                "Current smoker")), 
+                gender_health = factor(gender_health, levels = c("Male", "Female")), 
+                Heat = factor(Heat, levels = c("Electricity", "Coal+Electricity", "Wood+Electricity", 
+                                               "Wood+Coal+Electricity", "Coal", "Wood", "Wood+Coal", 
+                                               "No heating")))
+
+indoorPMFULL <- df_mix_indoor_24h[complete.cases(df_mix_indoor_24h$wave, 
+                                              df_mix_indoor_24h$treatment_village, 
+                                              df_mix_indoor_24h$PM25_indoor_24h_sensor, 
+                                              df_mix_indoor_24h$PM25_outdoor_sensor_24h, 
+                                              df_mix_indoor_24h$out_temp_24h, 
+                                              df_mix_indoor_24h$out_dew_24h, 
+                                              df_mix_indoor_24h$Heat, 
+                                              df_mix_indoor_24h$wealth_index, 
+                                              df_mix_indoor_24h$hh_smoking, 
+                                              df_mix_indoor_24h$hh_num, 
+                                              df_mix_indoor_24h$Quantity_coal, 
+                                              df_mix_indoor_24h$Quantity_Wood, 
+                                              df_mix_indoor_24h$Quantity_Honeycomb_coal, 
+                                              df_mix_indoor_24h$Quantity_LPG, 
+                                              df_mix_indoor_24h$ELE_winter_est),]
+
+mod_final <- lmer(log(PM25_indoor_24h_sensor) ~ log(PM25_outdoor_sensor_24h) + out_temp_24h + 
+                out_dew_24h + wave + Heat + hh_smoking + wealth_index + 
+                hh_num + (1|hh_id), data = indoorPMFULL)
+summary(mod_final)
+summ(mod_final, digits =3)
+confint(mod_final)
+
+```
+
+## Indoor filter-derived PM2.5
+
+```{r}
+df_mix_indoor_pm <- df_master_mix %>% 
+  dplyr::filter(if_usable_pm ==1) %>% 
+  dplyr::mutate(hh_smoking = factor(hh_smoking, 
+                                     levels = c("Non-smoker", "Former smoker", 
+                                                "Current smoker")), 
+                gender_health = factor(gender_health, levels = c("Male", "Female")), 
+                Heat = factor(Heat, levels = c("Electricity", "Coal+Electricity", "Wood+Electricity", 
+                                               "Wood+Coal+Electricity", "Coal", "Wood", "Wood+Coal", 
+                                               "No heating")))
+
+indoorPMFULL <- df_mix_indoor_pm[complete.cases(df_mix_indoor_pm$wave, 
+                                              df_mix_indoor_pm$treatment_village, 
+                                              df_mix_indoor_pm$PM25_indoor_filter, 
+                                              df_mix_indoor_pm$PM25_outdoor_sensor_24h, 
+                                              df_mix_indoor_pm$out_temp_24h, 
+                                              df_mix_indoor_pm$out_dew_24h, 
+                                              df_mix_indoor_pm$Heat, 
+                                              df_mix_indoor_pm$wealth_index, 
+                                              df_mix_indoor_pm$hh_smoking, 
+                                              df_mix_indoor_pm$hh_num, 
+                                              df_mix_indoor_pm$Quantity_coal, 
+                                              df_mix_indoor_pm$Quantity_Wood, 
+                                              df_mix_indoor_pm$Quantity_Honeycomb_coal, 
+                                              df_mix_indoor_pm$Quantity_LPG, 
+                                              df_mix_indoor_pm$ELE_winter_est),]
+
+mod_final <- lmer(log(PM25_indoor_filter) ~ log(PM25_outdoor_sensor_24h) + out_temp_24h + 
+                out_dew_24h + wave + Heat + hh_smoking + wealth_index + 
+                hh_num + (1|hh_id), data = indoorPMFULL)
+summary(mod_final)
+summ(mod_final, digits =3)
+confint(mod_final)
+
+```
+
+## Indoor BC
+
+```{r}
+df_mix_indoor_bc <- df_master_mix %>% 
+  dplyr::filter(if_usable_bc == 1) %>% 
+  group_by(hh_id, wave) %>% 
+  filter(n() == 1) %>% 
+  bind_rows(df_master_mix %>% 
+              filter(if_usable_bc == 1) %>% 
+              group_by(hh_id, wave) %>% 
+              filter(n() > 1, 
+                     !is.na(cent_radiator))) %>% 
+  dplyr::mutate(hh_smoking = factor(hh_smoking, 
+                                     levels = c("Non-smoker", "Former smoker", 
+                                                "Current smoker")), 
+                gender_health = factor(gender_health, levels = c("Male", "Female")), 
+                Heat = factor(Heat, levels = c("Electricity", "Coal+Electricity", 
+                                               "Wood+Electricity", "Wood+Coal+Electricity", 
+                                               "Coal", "Wood", "Wood+Coal", 
+                                               "No heating")))
+
+indoorBCFULL <- df_mix_indoor_bc[complete.cases(df_mix_indoor_bc$wave, 
+                                              df_mix_indoor_bc$treatment_village, 
+                                              df_mix_indoor_bc$BC_indoor_conc, 
+                                              df_mix_indoor_bc$PM25_outdoor_sensor_24h, 
+                                              df_mix_indoor_bc$out_temp_24h, 
+                                              df_mix_indoor_bc$out_dew_24h, 
+                                              df_mix_indoor_bc$Heat, 
+                                              df_mix_indoor_bc$wealth_index, 
+                                              df_mix_indoor_bc$hh_smoking, 
+                                              df_mix_indoor_bc$hh_num, 
+                                              df_mix_indoor_bc$Quantity_coal, 
+                                              df_mix_indoor_bc$Quantity_Wood, 
+                                              df_mix_indoor_bc$Quantity_Honeycomb_coal, 
+                                              df_mix_indoor_bc$Quantity_LPG, 
+                                              df_mix_indoor_bc$ELE_winter_est),]
+
+mod_final <- lmer(log(BC_indoor_conc) ~ log(PM25_outdoor_sensor_24h) + out_temp_24h + 
+                out_dew_24h + wave + Heat + hh_smoking + wealth_index + 
+                hh_num + (1|hh_id), data = indoorBCFULL)
+summary(mod_final)
+summ(mod_final, digits =3)
+confint(mod_final)
+
+```
+
+## Plot
+
+personal
+
+```{r}
+df_mixed_coefficient <- read.csv("../data_processed/mixed-effect-coefficient.csv")
+df_mixed_coefficient %>% 
+  dplyr::mutate(pollutant = case_when(
+                  pollutant == "PM2.5" ~ "Personal filter-based PM2.5", 
+                  pollutant == "BC" ~ "Personal filter-based BC", 
+                  pollutant == "Filter-derived BC" ~ "Indoor filter-based BC", 
+                  pollutant == "Sensor-reported seasonal PM2.5" ~ 
+                    "Indoor sensor-based seasonal PM2.5"),
+                pollutant = factor(pollutant, 
+                                   levels = c("Personal filter-based PM2.5", 
+                                              "Personal filter-based BC", 
+                                              "Indoor filter-based BC", 
+                                              "Indoor sensor-based seasonal PM2.5")), 
+                variables = 
+                  case_when(variables == "Coal + Electricity" ~ "Electricity + Coal", 
+                            variables == "Wood + Electricity" ~ "Electricity + Wood", 
+                            variables == "Wood + Coal + Electricity" ~ 
+                              "Electricity+ Coal + Wood", 
+                            variables == "Wood + Coal" ~ "Coal + Wood", 
+                            TRUE ~ variables), 
+                variables = factor(variables, 
+                                   levels = c("Female", "REF: Male", "Number of residents", 
+                                              "Wealth index", "Current smoker", 
+                                              "Live with smoker", "Former smoker", 
+                                              "REF: Non-smoker", "No heating", "Coal + Wood", 
+                                              "Wood", "Coal", "Electricity+ Coal + Wood", 
+                                              "Electricity + Wood", "Electricity + Coal", 
+                                              "REF: Electricity", "Outdoor dewpoint", 
+                                              "Outdoor temperature", "Log-trans Outdoor PM2.5",
+                                              "Wave 4", "Wave 2", "REF: Wave 2", 
+                                              "REF: Wave 1"))) %>% 
+  dplyr::filter(pollutant %in% c("Personal filter-based PM2.5", 
+                "Personal filter-based BC")) %>% 
+ggplot(aes(x = variables, y = estimate, color = ref)) + 
+  geom_point(size = 5, shape = 1, stroke = 1)+ 
+  geom_errorbar(aes(ymin = estimate_low, ymax = estimate_upper), width= 0, size = 1) + 
+  geom_hline(yintercept = 0)+
+  facet_wrap(~ pollutant, ncol = 2) + 
+  coord_flip() + 
+  scale_color_manual(values = c("black", "white")) + 
+  theme_bw() + 
+  theme(strip.text = element_text(size = 20), 
+        strip.background = element_rect(color="black", fill = "white", size=0.8, linetype="solid"), 
+        axis.title = element_text(size=20, color="black"),
+        axis.text.x = element_text(size = 20, color = "black"), 
+        axis.text.y = element_text(size = 20, color = "black"), 
+        panel.border = element_rect(size = 1, colour = "black"), 
+        axis.ticks.length = unit(0.15, "cm"), 
+        axis.ticks = element_line(color = "black", linewidth = 0.6), 
+        legend.position = "none", 
+        legend.background = element_blank(), 
+        legend.title = element_blank(), 
+        legend.key.size = unit(0.8, "cm"), 
+        legend.text = element_text(size = 16, color = "black"), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) + 
+  labs(x = "", y = "Estimates")
+ggsave("../figure/mixed-effect coefficient_personal.png", width = 14, height = 8)
+```
+
+indoor
+
+```{r}
+df_mixed_coefficient <- read.csv("../data_processed/mixed-effect-coefficient.csv")
+df_mixed_coefficient %>% 
+  dplyr::mutate(pollutant = case_when(
+                  pollutant == "PM2.5" ~ "Personal filter-based PM2.5", 
+                  pollutant == "BC" ~ "Personal filter-based BC", 
+                  pollutant == "Filter-derived BC" ~ "Indoor filter-based BC", 
+                  pollutant == "Sensor-reported seasonal PM2.5" ~ 
+                    "Indoor sensor-based seasonal PM2.5", 
+                  pollutant == "Filter-derived PM2.5" ~ "Indoor filter-based PM2.5", 
+                  pollutant == "Sensor-reported 24-h PM2.5" ~ 
+                    "Indoor sensor-based 24-h PM2.5"),
+                pollutant = factor(pollutant, 
+                                   levels = c("Personal filter-based PM2.5", 
+                                              "Personal filter-based BC", 
+                                              "Indoor filter-based PM2.5", 
+                                              "Indoor filter-based BC", 
+                                              "Indoor sensor-based 24-h PM2.5", 
+                                              "Indoor sensor-based seasonal PM2.5")), 
+                variables = 
+                  case_when(variables == "Coal + Electricity" ~ "Electricity + Coal", 
+                            variables == "Wood + Electricity" ~ "Electricity + Wood", 
+                            variables == "Wood + Coal + Electricity" ~ 
+                              "Electricity+ Coal + Wood", 
+                            variables == "Wood + Coal" ~ "Coal + Wood", 
+                            TRUE ~ variables), 
+                variables = factor(variables, 
+                                   levels = c("Female", "REF: Male", "Number of residents", 
+                                              "Wealth index", "Current smoker", 
+                                              "Live with smoker", "Former smoker", 
+                                              "REF: Non-smoker", "No heating", "Coal + Wood", 
+                                              "Wood", "Coal", "Electricity+ Coal + Wood", 
+                                              "Electricity + Wood", "Electricity + Coal", 
+                                              "REF: Electricity", "Outdoor dewpoint", 
+                                              "Outdoor temperature", "Log-trans Outdoor PM2.5",
+                                              "Wave 4", "Wave 2", "REF: Wave 2", 
+                                              "REF: Wave 1"))) %>% 
+  dplyr::filter(pollutant %in% c("Indoor filter-based PM2.5", "Indoor filter-based BC", 
+                "Indoor sensor-based 24-h PM2.5", "Indoor sensor-based seasonal PM2.5")) %>% 
+ggplot(aes(x = variables, y = estimate, color = ref)) + 
+  geom_point(size = 5, shape = 1, stroke = 1)+ 
+  geom_errorbar(aes(ymin = estimate_low, ymax = estimate_upper), width= 0, size = 1) + 
+  geom_hline(yintercept = 0)+
+  facet_wrap(~ pollutant, ncol = 2) + 
+  coord_flip() + 
+  scale_color_manual(values = c("black", "white")) + 
+  theme_bw() + 
+  theme(strip.text = element_text(size = 20), 
+        strip.background = element_rect(color="black", fill = "white", size=0.8, linetype="solid"), 
+        axis.title = element_text(size=20, color="black"),
+        axis.text.x = element_text(size = 20, color = "black"), 
+        axis.text.y = element_text(size = 20, color = "black"), 
+        panel.border = element_rect(size = 1, colour = "black"), 
+        axis.ticks.length = unit(0.15, "cm"), 
+        axis.ticks = element_line(color = "black", linewidth = 0.6), 
+        legend.position = "none", 
+        legend.background = element_blank(), 
+        legend.title = element_blank(), 
+        legend.key.size = unit(0.8, "cm"), 
+        legend.text = element_text(size = 16, color = "black"), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) + 
+  labs(x = "", y = "Estimates")
+ggsave("../figure/mixed-effect coefficient_indoor.png", width = 14, height = 16)
+```
+
+## Outdoor BC
+
+```{r}
+out_bc_lmer <- lmer(log(bc_m3) ~ ws + temp + ws + wdir +
+                      n_hh + as.factor(wave) + (1 | village),
+     data = df_master_outdoor_bc %>% filter(bc_m3 > 0) %>% mutate(n_hh = n_hh/100,
+                                                                  wdir = wdir/100))
+
+out_bc_lmer_sum <- confint(out_bc_lmer) %>% 
+  tail(-3) %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "variable") %>% 
+  left_join(rownames_to_column(as.data.frame(summary(out_bc_lmer)$coefficients), "variable")) %>% 
+  mutate(variable = fct_recode(variable,
+                               "Wind speed" = "ws",
+                               "Temperature" = "temp",
+                               "Wind direction/100" = "wdir",
+                               "Household number/100" = "n_hh",
+                               "Wave 2" = "as.factor(wave)2",
+                               "Wave 4" = "as.factor(wave)4"),
+         measurement = "Outdoor filter-based BC")
+```
+
+## Sensor
+
+```{r}
+df_master_outdoor_sensor_seasonal_pm
+
+out_seasonal_lmer <- lmer(log(pm2.5) ~ as.factor(wave) + temp + wdir + 
+                            ws + n_hh  + (1 | village),
+     data = df_master_outdoor_sensor_seasonal_pm %>% 
+       mutate(n_hh = n_hh/100,
+              wdir = wdir/100))
+
+out_seasonal_lmer_sum <- confint(out_seasonal_lmer) %>% 
+  tail(-3) %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "variable") %>% 
+  left_join(rownames_to_column(as.data.frame(summary(out_seasonal_lmer)$coefficients), "variable")) %>% 
+    mutate(variable = fct_recode(variable,
+                               "Wind speed" = "ws",
+                               "Temperature" = "temp",
+                               "Wind direction/100" = "wdir",
+                               "Household number/100" = "n_hh",
+                               "Wave 2" = "as.factor(wave)2",
+                               "Wave 4" = "as.factor(wave)4"),
+         measurement = "Outdoor sensor-based seasonal PM2.5")
+```
+
+## Put together plots
+
+```{r}
+rbind(out_bc_lmer_sum, out_seasonal_lmer_sum) %>% 
+  add_row(variable = "REF: Wave 1", `2.5 %` = NA, `97.5 %` = NA, Estimate = NA, `Std. Error` = NA, 
+          `t value` = NA, measurement = "Outdoor sensor-based seasonal PM2.5") %>% 
+  add_row(variable = "REF: Wave 1", `2.5 %` = NA, `97.5 %` = NA, Estimate = NA, `Std. Error` = NA, 
+          `t value` = NA, measurement = "Outdoor filter-based BC") %>% 
+  mutate(variable = factor(variable, levels = c("Household number/100", "Wind direction/100", 
+                                                "Wind speed", "Temperature", "Wave 4", "Wave 2", 
+                                                "REF: Wave 1")), 
+         measurement = factor(measurement, levels = c("Outdoor sensor-based seasonal PM2.5", 
+                                                      "Outdoor filter-based BC"))) %>% 
+  ggplot(aes(y = Estimate, x = variable)) +
+  geom_point(shape = 1, size = 5, stroke = 1) +
+  geom_errorbar(aes(ymin = `2.5 %`, ymax = `97.5 %`),
+                size = 1, position=position_dodge(0.7), width = 0) +
+  geom_hline(yintercept = 0) +
+  coord_flip() + 
+  facet_wrap(~measurement, nrow = 1, scales = "free_x") +
+  theme_bw() + 
+  theme(strip.text = element_text(size = 20), 
+        strip.background = element_rect(color="black", fill = "white", size=0.8, linetype="solid"), 
+        axis.title = element_text(size=20, color="black"),
+        axis.text.x = element_text(size = 20, color = "black"), 
+        axis.text.y = element_text(size = 20, color = "black"), 
+        panel.border = element_rect(size = 1, colour = "black"), 
+        axis.ticks.length = unit(0.15, "cm"), 
+        axis.ticks = element_line(color = "black", linewidth = 0.6), 
+        legend.position = "none", 
+        legend.background = element_blank(), 
+        legend.title = element_blank(), 
+        legend.key.size = unit(0.8, "cm"), 
+        legend.text = element_text(size = 16, color = "black"), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) + 
+  labs(x = "", y = "Estimates")
+ggsave("../figure/mixed-effect coefficient_outdoor.png", width = 14, height = 5)
+```
+
+# 4. Difference-in-difference analysis
+
+## Create the sub-dataset
+
+```{r}
+df_master_did <- df_master %>% 
+  dplyr::filter(wave != 3) %>% 
+  dplyr::mutate(field_year = case_when(wave == 1 ~ 2018, 
+                                       wave == 2 ~ 2019, 
+                                       wave == 4 ~ 2021), 
+                treatment = case_when(wave == 1 ~ 0, 
+                                      wave == 2 & ban_status_composite == 1 ~ 1, 
+                                      wave == 2 & ban_status_composite != 1 ~ 0, 
+                                      wave == 4 & ban_status_composite == 0 ~ 0, 
+                                      wave == 4 & ban_status_composite != 0 ~ 1), 
+                treatment_year = case_when(ban_status_composite == 0 ~ -Inf, 
+                                           ban_status_composite == 1 ~ 2019, 
+                                           ban_status_composite == 2 ~ 2020, 
+                                           ban_status_composite == 3 ~ 2021), 
+                ptc_smoking = case_when(smoking == 1 ~ "Current smoker", 
+                                        smoking == 2 ~ "Former smoker", 
+                                        smoking == 3 & lived_with_smoker == 1 ~ "Non-smoker", 
+                                        smoking == 3 & lived_with_smoker == 2 ~ "Non-smoker", 
+                                        smoking == 3 & lived_with_smoker == 3 ~ 
+                                          "Non-smoker living with a current smoker"), 
+                hh_smoking = case_when(smoking == 1 ~ "Current smoker", 
+                                       smoking == 2 ~ "Former smoker", 
+                                       smoking == 3 & lived_with_smoker == 1 ~ "Non-smoker", 
+                                       smoking == 3 & lived_with_smoker == 2 ~ "Former smoker", 
+                                       smoking == 3 & lived_with_smoker == 3 ~ "Current smoker"), 
+   # add dummies for smoking
+   ptc_smoking_former = if_else(
+      ptc_smoking=="Former smoker", 1, 0), 
+   ptc_smoking_lived = if_else(
+      ptc_smoking=="Non-smoker living with a current smoker", 1, 0), 
+   ptc_smoking_none = if_else(
+      ptc_smoking=="Non-smoker", 1, 0), 
+   # add dummies for smoking
+   hh_smoking_former = if_else(
+      hh_smoking=="Former smoker", 1, 0), 
+   hh_smoking_none = if_else(
+      hh_smoking=="Non-smoker", 1, 0)) %>% 
+  # coal ban dummies
+  add_dummy_variables(treatment_year, 
+    values=c(-Inf,2019,2020,2021), 
+    remove_original = F) %>%
+  # wave dummies
+  add_dummy_variables(field_year, 
+    values=c(2018,2019,2021), remove_original = F) %>%
+  group_by(ID_VILLAGE) %>%
+  mutate(v_id = cur_group_id()) %>%
+  ungroup() %>% 
+  #wealth index 
+  mutate(wq = as.integer(cut(wealth_index, 
+                             quantile(wealth_index, 
+                                      probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = T), 
+                             labels = c(1:4), include.lowest = T))) %>% 
+  ungroup() %>% 
+  add_dummy_variables(wq, values=c(1:4), remove_original = F)
+
+```
+
+## Create a function to estimate the and adjusted ETWFE models
+
+```{r}
+## define a function to estimate the and adjusted ETWFE models, estimate the marginal effects (including heterogeneity) and put results in a list ----
+
+estimate_etwfe <- function(
+    lhs, rhs1, rhs2, data) {
+  
+  # Create model formula for model 1
+  fml1 <- as.formula(paste(lhs, "~", 
+    paste(rhs1, collapse = " + ")))
+  
+  # Fit gamma model for the first set of predictors
+  # (see personal-models.qmd for details)
+  etwfe1 <- fixest::feglm(fml = fml1, 
+    data = data, cluster = ~ID_VILLAGE,
+    family = Gamma(link = "log"))
+  
+  # get marginal effects
+  me_etwfe1 <- marginaleffects::slopes(
+      etwfe1, newdata = subset(data, treatment==1),
+      variables = "treatment", by = "treatment")
+    
+  # estimates across group-time treatment cohorts
+  me_het1 <- marginaleffects::slopes(
+      etwfe1, newdata = subset(data, treatment==1),
+      variables = "treatment", 
+      by = c("treatment_year", "field_year"))
+  
+  # now test for heterogeneity
+  # for estimates using all 4 waves
+  if (nrow(me_het1)==4) {
+    # estimate the model contrast
+    me_het1_c <- hypotheses(me_het1, hypothesis = 
+      c("b1 - b2 = 0", "b1 - b3 = 0", 
+                     "b1 - b4 = 0"))
+    # get test and p-value from joint test
+    me_jt1 <- hypotheses(me_het1_c, joint = TRUE)
+  # for estimates using 3 waves
+  } else {
+    me_het1_c <- hypotheses(me_het1, hypothesis = 
+      c("b1 - b2 = 0"))
+    me_jt1 <- hypotheses(me_het1_c, joint = TRUE)
+  }
+
+  # Create model formula for adjusted model
+  fml2 <- as.formula(paste(lhs, "~", 
+    paste(rhs2, collapse = " + ")))  
+  
+  # Fit model for adjusted ETWFE
+  etwfe2 <- fixest::feglm(fml = fml2, 
+    data = data, cluster = ~ID_VILLAGE,
+    family = Gamma(link = "log"))
+  
+  # get marginal effects
+    me_etwfe2 <- marginaleffects::slopes(
+      etwfe2, newdata = subset(data, treatment==1),
+      variables = "treatment", by = "treatment")
+  
+  # allow for heterogeneity across treatment cohorts
+  me_het2 <- marginaleffects::slopes(
+      etwfe2, newdata = subset(data, treatment==1),
+      variables = "treatment", 
+      by = c("treatment_year", "field_year"))
+    
+  # now test for heterogeneity
+  # for estimates using all 4 waves
+  if (nrow(me_het2)==4) {
+    # estimate the model contrast
+    me_het2_c <- hypotheses(me_het2, hypothesis = 
+      c("b1 - b2 = 0", "b1 - b3 = 0", 
+                     "b1 - b4 = 0"))
+  # get test and p-value from joint test
+    me_jt2 <- hypotheses(me_het2_c, joint = TRUE)
+  # for estimates using 3 waves
+  } else {
+    me_het2_c <- hypotheses(me_het2, hypothesis = 
+      c("b1 - b2 = 0"))
+    me_jt2 <- hypotheses(me_het2_c, joint = TRUE)
+  }
+  
+  # Return a list containing both models
+  return(list(e1 = etwfe1, me_1 = me_etwfe1,
+              meh_1 = me_het1, ht1 = me_jt1, 
+              e2 = etwfe2, me_2 = me_etwfe2,
+              meh_2 = me_het2, ht2 = me_jt2))
+}
+
+# covariates for basic ETWFE specification
+# personal PM and BC
+rhs_did <- c("treatment:treatment_year_2019:field_year_2019",
+  "treatment:treatment_year_2019:field_year_2021", 
+  "treatment:treatment_year_2020:field_year_2021",
+  "treatment:treatment_year_2021:field_year_2021",
+  "treatment_year_2019", "treatment_year_2020", 
+  "treatment_year_2021", "field_year_2019",
+  "field_year_2021")
+
+# indoor daily and seasonal
+# drop 2019 cohort and year dummies
+rhs_didi <- c("treatment:treatment_year_2020:field_year_2021",
+  "treatment:treatment_year_2021:field_year_2021", 
+  "treatment_year_2020", "treatment_year_2021", 
+  "field_year_2021")
+
+# ETWFE plus covariates
+rhs_dida <- c(rhs_did, "hh_num", "ptc_smoking_former",
+  "ptc_smoking_lived", "ptc_smoking_none", 
+  "ns(out_temp, df=2)", 
+  "ns(out_dew, df=2)")
+
+# ETWFE plus covariates
+rhs_didia <- c(rhs_didi, "hh_num", "hh_smoking_former",
+  "hh_smoking_none",
+  "ns(out_temp, df=2)", 
+  "ns(out_dew, df=2)")
+
+```
+
+## ETWEF analysis
+
+### Personal PM2.5
+
+```{r}
+df_master_personal_pm <- df_master_did %>% 
+  dplyr::filter(p_usable_pm == 1) %>% 
+  dplyr::rename(out_temp = out_temp_24h, 
+                out_dew = out_dew_24h) %>% 
+  drop_na(ptc_smoking, out_temp, out_dew, wealth_index, hh_num, 
+          PM25conc_exposureugm3,	p_usable_pm)
+
+did_personal_pm <- estimate_etwfe(lhs="PM25conc_exposureugm3", 
+                                  rhs1=rhs_did, rhs2=rhs_dida, 
+                                  data=df_master_personal_pm)
+write_rds(did_personal_pm, "../data_processed/did_personal_pm.rds")
+```
+
+#### Pre-trend
+
+```{r}
+# Limit to pre-intervention years/cohort
+df_personal_pm_r <- df_master_personal_pm %>% 
+  filter(wave < 4 & ban_status_2019 == 0) %>%
+  mutate(wave = case_when(wave == "1" ~ "Wave 1", 
+                                 wave == "2" ~ "Wave 2", 
+                                 wave == "4" ~ "Wave 4"), 
+         ban_status = case_when(ban_status_composite == 0 ~ "Untreated", 
+                                       ban_status_composite == 1 ~ "Treated Wave 2", 
+                                       ban_status_composite == 2 ~ "Treated Wave 3", 
+                                       ban_status_composite == 3 ~ "Treated Wave 4"), 
+         ban_status = factor(ban_status, 
+                             labels = c("Untreated", "Treated Wave 3", "Treated Wave 4")))
+
+# estimate model
+df_personal_pm_glm <- glm(PM25conc_exposureugm3 ~ wave * ban_status,
+  data = df_personal_pm_r, family = gaussian(link = "log"))
+
+# Time trends by treatment status
+avg_comparisons(df_personal_pm_glm, 
+  var = "wave",
+  by = "ban_status",
+  vcov = ~ ID_VILLAGE)
+
+# Difference in time trends by treatment
+df_personal_pm_diff <- avg_comparisons(df_personal_pm_glm, 
+  var = "wave",
+  by = "ban_status",
+  hypothesis = c("b2 - b1 = 0", "b3 - b1 = 0"),
+  vcov = ~ ID_VILLAGE)
+
+df_personal_pm_diff <- hypotheses(df_personal_pm_diff, joint = TRUE)
+
+# Plot of trends and estimates
+plot_predictions(df_personal_pm_glm, condition = c("wave", "ban_status")) + 
+  scale_y_continuous(limits = c(0, 200), expand = c(0, 0)) + 
+  scale_color_manual(values = c("#3c3c3c", "#1B7837", "#74c476")) + 
+  theme_bw() + 
+  theme(panel.spacing.x = unit(0.3,"line"), 
+        strip.text = element_text(size = 12), 
+        strip.background = element_rect(color="black", fill = "white", size=0.8, linetype="solid"), 
+        axis.title = element_text(size=12, color="black"),
+        axis.text.x = element_text(size = 12, color = "black"), 
+        axis.text.y = element_text(size = 12, color = "black"), 
+        panel.border = element_rect(size = 1, colour = "black"),
+        axis.ticks.length = unit(0.15, "cm"), 
+        axis.ticks = element_line(color = "black", linewidth = 0.6), 
+        legend.position = c(0.22, 0.85), 
+        legend.background = element_blank(), 
+        legend.title = element_blank(), 
+        legend.key.size = unit(0.6, "cm"), 
+        legend.text = element_text(size = 12, color = "black"), 
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_blank(), 
+        panel.grid.minor = element_blank()) + 
+  labs(x = "", y = bquote(Personal~PM[2.5]~'(μg' ~ m^-3*')'), 
+       title = paste0("Joint F-test of equal trends by cohort\n", 
+                      "F(", signif(df_personal_pm_diff$df1, 2), ", ", 
+                      df_personal_pm_diff$df2, ") = ", 
+                      signif(df_personal_pm_diff$statistic, 2),
+                     ", p = ", signif(df_personal_pm_diff$p.value, 2)))
+ggsave("../figure/pre-trend-personal-pm.png", width = 5, height = 4)
+```
+
+### Personal BC
+
+```{r}
+df_master_personal_bc <- df_master_did %>% 
+  filter(p_usable_bc == 1) %>% 
+  dplyr::rename(out_temp = out_temp_24h, 
+                out_dew = out_dew_24h) %>% 
+  drop_na(ptc_smoking, out_temp, out_dew, wealth_index, hh_num, 
+          BCconc_exposureugm3,	p_usable_bc)
+
+did_personal_bc <- estimate_etwfe(lhs="BCconc_exposureugm3", 
+                                  rhs1=rhs_did, rhs2=rhs_dida, 
+                                  data=df_master_personal_bc)
+write_rds(did_personal_bc, "../data_processed/did_personal_bc.rds")
+```
+
+#### Pre-trend
+
+```{r}
+# Limit to pre-intervention years/cohort
+df_personal_bc_r <- df_master_personal_bc %>% 
+  filter(wave < 4 & ban_status_2019 == 0) %>%
+  mutate(wave = case_when(wave == "1" ~ "Wave 1", 
+                                 wave == "2" ~ "Wave 2", 
+                                 wave == "4" ~ "Wave 4"), 
+         ban_status = case_when(ban_status_composite == 0 ~ "Untreated", 
+                                       ban_status_composite == 1 ~ "Treated Wave 2", 
+                                       ban_status_composite == 2 ~ "Treated Wave 3", 
+                                       ban_status_composite == 3 ~ "Treated Wave 4"), 
+         ban_status = factor(ban_status, 
+                             labels = c("Untreated", "Treated Wave 3", "Treated Wave 4")))
+
+# estimate model
+df_personal_bc_glm <- glm(BCconc_exposureugm3 ~ wave * ban_status,
+  data = df_personal_bc_r, family = gaussian(link = "log"))
+
+# Time trends by treatment status
+avg_comparisons(df_personal_bc_glm, 
+  var = "wave",
+  by = "ban_status",
+  vcov = ~ ID_VILLAGE)
+
+# Difference in time trends by treatment
+df_personal_bc_diff <- avg_comparisons(df_personal_bc_glm, 
+  var = "wave",
+  by = "ban_status",
+  hypothesis = c("b2 - b1 = 0", "b3 - b1 = 0"),
+  vcov = ~ ID_VILLAGE)
+
+df_personal_bc_diff <- hypotheses(df_personal_bc_diff, joint = TRUE)
+
+
+# Plot of trends and estimates
+plot_predictions(df_personal_bc_glm, condition = c("wave", "ban_status")) + 
+  scale_y_continuous(limits = c(0, 8), expand = c(0, 0)) + 
+  scale_color_manual(values = c("#3c3c3c", "#1B7837", "#74c476")) + 
+  theme_bw() + 
+  theme(panel.spacing.x = unit(0.3,"line"), 
+        strip.text = element_text(size = 12), 
+        strip.background = element_rect(color="black", fill = "white", size=0.8, linetype="solid"), 
+        axis.title = element_text(size=12, color="black"),
+        axis.text.x = element_text(size = 12, color = "black"), 
+        axis.text.y = element_text(size = 12, color = "black"), 
+        panel.border = element_rect(size = 1, colour = "black"),
+        axis.ticks.length = unit(0.15, "cm"), 
+        axis.ticks = element_line(color = "black", linewidth = 0.6), 
+        legend.position = "none", 
+        legend.background = element_blank(), 
+        legend.title = element_blank(), 
+        legend.key.size = unit(0.6, "cm"), 
+        legend.text = element_text(size = 12, color = "black"), 
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_blank(), 
+        panel.grid.minor = element_blank()) + 
+  labs(x = "", y = bquote(Personal~BC~'(μg' ~ m^-3*')'), 
+       title = paste0("Joint F-test of equal trends by cohort\n", 
+                      "F(", signif(df_personal_bc_diff$df1, 2), ", ", 
+                      df_personal_bc_diff$df2, ") = ", 
+                      signif(df_personal_bc_diff$statistic, 2),
+                     ", p = ", signif(df_personal_bc_diff$p.value, 2)))
+ggsave("../figure/pre-trend-personal-bc.png", width = 5, height = 4)
+```
+
+### Indoor filter-derived PM2.5
+
+```{r}
+df_master_indoor_filter_pm <- df_master_did %>% 
+  filter(if_usable_pm == 1) %>% 
+  group_by(hh_id, wave) %>% 
+  filter(n() == 1) %>% 
+  bind_rows(df_master_did %>% 
+              filter(if_usable_pm == 1) %>% 
+              group_by(hh_id, wave) %>% 
+              filter(n() > 1, 
+                     !is.na(cent_radiator))) %>% 
+  dplyr::rename(out_temp = out_temp_24h, 
+                out_dew = out_dew_24h) %>% 
+  drop_na(hh_smoking, out_temp, out_dew, wealth_index, hh_num, 
+          PM25_indoor_filter, if_usable_pm) %>% 
+  filter(treatment_year_2019 != 1) 
+
+did_indoor_filter_pm <- estimate_etwfe(lhs="PM25_indoor_filter", 
+                                  rhs1=rhs_didi, rhs2=rhs_didia, 
+                                  data=df_master_indoor_filter_pm)
+write_rds(did_indoor_filter_pm, "../data_processed/did_indoor_filter_pm.rds")
+```
+
+### Indoor filter-derived BC
+
+```{r}
+df_master_indoor_filter_bc <- df_master_did %>% 
+  filter(if_usable_bc == 1) %>% 
+  group_by(hh_id, wave) %>% 
+  filter(n() == 1) %>% 
+  bind_rows(df_master_did %>% 
+              filter(if_usable_bc == 1) %>% 
+              group_by(hh_id, wave) %>% 
+              filter(n() > 1, 
+                     !is.na(cent_radiator))) %>% 
+  dplyr::rename(out_temp = out_temp_24h, 
+                out_dew = out_dew_24h) %>% 
+  drop_na(hh_smoking, out_temp, out_dew, wealth_index, hh_num, 
+          BC_indoor_conc, if_usable_bc) %>% 
+  filter(treatment_year_2019 != 1)
+
+did_indoor_filter_bc <- estimate_etwfe(lhs="BC_indoor_conc", 
+                                  rhs1=rhs_didi, rhs2=rhs_didia, 
+                                  data=df_master_indoor_filter_bc)
+write_rds(did_indoor_filter_bc, "../data_processed/did_indoor_filter_bc.rds")
+```
+
+### Indoor sensor-reported 24-h PM2.5
+
+```{r}
+df_master_indoor_sensor_daily_pm <- df_master_did %>% 
+  filter(!is.na(PM25_indoor_24h_sensor)) %>% 
+  group_by(hh_id, wave) %>% 
+  filter(n() == 1) %>% 
+  bind_rows(df_master_did %>% 
+              filter(!is.na(PM25_indoor_24h_sensor)) %>% 
+              group_by(hh_id, wave) %>% 
+              filter(n() > 1, 
+                     !is.na(cent_radiator))) %>% 
+  dplyr::rename(out_temp = out_temp_24h, 
+                out_dew = out_dew_24h) %>% 
+  drop_na(hh_smoking, out_temp, out_dew, wealth_index, hh_num, 
+          PM25_indoor_24h_sensor) %>% 
+  filter(treatment_year_2019 != 1)
+  
+did_indoor_sensor_daily_pm <- estimate_etwfe(lhs="PM25_indoor_24h_sensor", 
+                                  rhs1=rhs_didi, rhs2=rhs_didia, 
+                                  data=df_master_indoor_sensor_daily_pm)
+write_rds(did_indoor_sensor_daily_pm, "../data_processed/did_indoor_sensor_daily_pm.rds")
+```
+
+### Indoor sensor-reported seasonal PM2.5
+
+```{r}
+df_master_indoor_sensor_seasonal_pm <- df_master_did %>% 
+  filter(n_percent_indoor_seasonal_hs >= 0.2) %>% 
+  group_by(hh_id, wave) %>% 
+  filter(n() == 1) %>% 
+  bind_rows(df_master_did %>% 
+              filter(n_percent_indoor_seasonal_hs >= 0.2) %>% 
+              group_by(hh_id, wave) %>% 
+              filter(n() > 1, 
+                     !is.na(cent_radiator))) %>% 
+  dplyr::rename(out_temp = out_temp_season, 
+                out_dew = out_dew_season) %>% 
+  drop_na(hh_smoking, out_temp, out_dew, wealth_index, hh_num, 
+          PM25_indoor_seasonal_hs, n_percent_indoor_seasonal_hs) %>% 
+  filter(treatment_year_2019 != 1)
+
+did_indoor_sensor_seasonal_pm <- estimate_etwfe(lhs="PM25_indoor_seasonal_hs", 
+                                  rhs1=rhs_didi, rhs2=rhs_didia, 
+                                  data=df_master_indoor_sensor_seasonal_pm)
+write_rds(did_indoor_sensor_seasonal_pm, "../data_processed/did_indoor_sensor_seasonal_pm.rds")
+```
+
+### Outdoor filter-derived BC !NEW!
+
+```{r}
+# ETWFE plus covariates outdoor BC
+rhs_did_outdoor_bc <- c(rhs_did, "ws", "wdir", "n_hh")
+
+# model
+did_outdoor_bc <- estimate_etwfe(lhs="bc_m3", 
+                                  rhs1=rhs_did, rhs2=rhs_did_outdoor_bc, 
+                                  data=df_master_outdoor_bc)
+
+write_rds(did_outdoor_bc, "../data_processed/did_outdoor_bc.rds")
+```
+
+#### Pre trends: outdoor BC !NEW!
+
+```{r}
+# Limit to pre-intervention years/cohort
+df_outdoor_bc_r <- df_master_outdoor_bc %>% 
+  filter(wave < 4 & ban_enter != "treated in year 2") %>%
+  mutate(wave = case_when(wave == 1 ~ "Wave 1", 
+                                 wave == 2 ~ "Wave 2", 
+                                 wave == 4 ~ "Wave 4"), 
+         ban_status = case_when(ban_enter == "untreated" ~ "Untreated",
+                                       ban_enter == "treated in year 3" ~ "Treated Wave 3", 
+                                       ban_enter == "treated in year 4" ~ "Treated Wave 4"), 
+         ban_status = factor(ban_status, 
+                             levels = c("Untreated", "Treated Wave 3", "Treated Wave 4")))
+
+# estimate model
+df_outdoor_bc_glm <- glm(bc_m3 ~ wave * ban_status,
+  data = df_outdoor_bc_r, family = gaussian(link = "log"))
+
+# Time trends by treatment status
+avg_comparisons(df_outdoor_bc_glm, 
+  var = "wave",
+  by = "ban_status",
+  vcov = ~ ID_VILLAGE)
+
+# Difference in time trends by treatment
+df_outdoor_bc_diff <- avg_comparisons(df_outdoor_bc_glm, 
+  var = "wave",
+  by = "ban_status",
+  hypothesis = c("b2 - b1 = 0", "b3 - b1 = 0"),
+  vcov = ~ ID_VILLAGE)
+
+df_outdoor_bc_diff <- hypotheses(df_outdoor_bc_diff, joint = TRUE)
+
+# Plot of trends and estimates
+plot_predictions(df_outdoor_bc_glm, condition = c("wave", "ban_status")) + 
+  scale_y_continuous(limits = c(0, 3), expand = c(0, 0)) + 
+  scale_color_manual(values = c("#3c3c3c", "#1B7837", "#74c476")) + 
+  theme_bw() + 
+  theme(panel.spacing.x = unit(0.3,"line"), 
+        strip.text = element_text(size = 12), 
+        strip.background = element_rect(color="black", fill = "white", size=0.8, linetype="solid"), 
+        axis.title = element_text(size=12, color="black"),
+        axis.text.x = element_text(size = 12, color = "black"), 
+        axis.text.y = element_text(size = 12, color = "black"), 
+        panel.border = element_rect(size = 1, colour = "black"),
+        axis.ticks.length = unit(0.15, "cm"), 
+        axis.ticks = element_line(color = "black", linewidth = 0.6), 
+        legend.position = "none", 
+        legend.background = element_blank(), 
+        legend.title = element_blank(), 
+        legend.key.size = unit(0.6, "cm"), 
+        legend.text = element_text(size = 12, color = "black"), 
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_blank(), 
+        panel.grid.minor = element_blank()) + 
+  labs(x = "", y = bquote(Outdoor~BC~'(μg' ~ m^-3*')'),
+       title = paste0("Joint F-test of equal trends by cohort\n", 
+                      "F(", signif(df_outdoor_bc_diff$df1, 2), ", ", 
+                      df_outdoor_bc_diff$df2, ") = ", signif(df_outdoor_bc_diff$statistic, 2),
+                     ", p = ", signif(df_outdoor_bc_diff$p.value, 2)))
+
+ggsave("../figure/pre-trend-outdoor-bc.png", width = 5, height = 4)
+```
+
+### Outdoor sensor-reported seasonal PM2.5 !NEW!
+
+```{r}
+# model statement outdoor sensor
+rhs_did_outdoor_sensor <- c(rhs_did, "ns(temp, df = 2)", "ns(ws, df = 2)",
+  "wdir")
+
+# model
+did_outdoor_seasonal <- estimate_etwfe(lhs="pm2.5", 
+                                  rhs1=rhs_did, rhs2=rhs_did_outdoor_sensor, 
+                                  data=df_master_outdoor_sensor_seasonal_pm %>% filter(wave != 3))
+
+write_rds(did_outdoor_seasonal, "../data_processed/did_outdoor_seasonal.rds")
+```
+
+#### Pre trends: outdoor seasonal sensor !NEW!
+
+```{r}
+# Limit to pre-intervention years/cohort
+df_outdoor_seasonal_r <- df_master_outdoor_sensor_seasonal_pm %>% 
+  filter(wave != 3) %>% 
+  filter(wave < 4 & ban_enter != "treated in year 2") %>%
+  mutate(wave = case_when(wave == 1 ~ "Wave 1", 
+                                 wave == 2 ~ "Wave 2", 
+                                 wave == 4 ~ "Wave 4"), 
+         ban_status = case_when(ban_enter == "untreated" ~ "Untreated",
+                                       ban_enter == "treated in year 3" ~ "Treated Wave 3", 
+                                       ban_enter == "treated in year 4" ~ "Treated Wave 4"), 
+         ban_status = factor(ban_status))
+
+df_outdoor_seasonal_r %>% 
+  group_by(wave, ban_status) %>%
+  count()
+
+# estimate model
+df_outdoor_seasonal_glm <- glm(pm2.5 ~ wave * ban_status,
+  data = df_outdoor_seasonal_r, family = gaussian(link = "log"))
+
+# Time trends by treatment status
+avg_comparisons(df_outdoor_seasonal_glm, 
+  var = "wave",
+  by = "ban_status",
+  vcov = ~ ID_VILLAGE)
+
+# Difference in time trends by treatment
+df_outdoor_seasonal_diff <- avg_comparisons(df_outdoor_seasonal_glm, 
+  var = "wave",
+  by = "ban_status",
+  hypothesis = c("b2 - b1 = 0", "b3 - b1 = 0"),
+  vcov = ~ ID_VILLAGE)
+
+df_outdoor_seasonal_diff <- hypotheses(df_outdoor_seasonal_diff, joint = TRUE)
+
+# Plot of trends and estimates
+plot_predictions(df_outdoor_seasonal_glm, condition = c("wave", "ban_status")) + 
+  scale_y_continuous(breaks = seq(0, 70, 10), limits = c(0, 70), expand = c(0, 0)) + 
+  scale_color_manual(values = c("#3c3c3c", "#1B7837", "#74c476")) + 
+  theme_bw() + 
+  theme(panel.spacing.x = unit(0.3,"line"), 
+        strip.text = element_text(size = 12), 
+        strip.background = element_rect(color="black", fill = "white", 
+                                        size=0.8, linetype="solid"), 
+        axis.title = element_text(size=12, color="black"),
+        axis.text.x = element_text(size = 12, color = "black"), 
+        axis.text.y = element_text(size = 12, color = "black"), 
+        panel.border = element_rect(size = 1, colour = "black"),
+        axis.ticks.length = unit(0.15, "cm"), 
+        axis.ticks = element_line(color = "black", linewidth = 0.6), 
+        legend.position = "none", 
+        legend.background = element_blank(), 
+        legend.title = element_blank(), 
+        legend.key.size = unit(0.6, "cm"), 
+        legend.text = element_text(size = 12, color = "black"), 
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_blank(), 
+        panel.grid.minor = element_blank()) + 
+  labs(x = "", y = bquote(Outdoor~PM[2.5]~'(μg' ~ m^-3*')'),
+       title = paste0("Joint F-test of equal trends by cohort\n", 
+                      "F(", signif(df_outdoor_seasonal_diff$df1, 2), ", ",
+                     df_outdoor_seasonal_diff$df2, ") = ", signif(df_outdoor_seasonal_diff$statistic, 2),
+                     ", p = ", signif(df_outdoor_seasonal_diff$p.value, 2)))
+
+ggsave("../figure/pre-trend-outdoor-seasonal.png", width = 5, height = 4)
+```
+
+## Summarize TWFE results
+
+```{r}
+twfe_personal_pm <- bind_rows(did_personal_pm$me_1, did_personal_pm$me_2) %>% 
+  mutate(category = "Personal", 
+         outcome = "Filter-based PM2.5",
+         nobs = did_personal_pm$e1$nobs)
+
+twfe_personal_bc <- bind_rows(did_personal_bc$me_1, did_personal_bc$me_2) %>% 
+  mutate(category = "Personal", 
+         outcome = "Filter-based BC",
+         nobs = did_personal_bc$e1$nobs)
+
+twfe_indoor_filter_pm <- bind_rows(did_indoor_filter_pm$me_1, did_indoor_filter_pm$me_2) %>% 
+  mutate(category = "Indoor", 
+         outcome = "Filter-based PM2.5",
+         nobs = did_indoor_filter_pm$e1$nobs)
+
+twfe_indoor_filter_bc <- bind_rows(did_indoor_filter_bc$me_1, did_indoor_filter_bc$me_2) %>% 
+  mutate(category = "Indoor", 
+         outcome = "Filter-based BC",
+         nobs = did_indoor_filter_bc$e1$nobs)
+
+twfe_indoor_sensor_24h_pm <- bind_rows(did_indoor_sensor_daily_pm$me_1,
+                                            did_indoor_sensor_daily_pm$me_2) %>% 
+  mutate(category = "Indoor", 
+         outcome = "Sensor-based 24-h PM2.5",
+         nobs = did_indoor_sensor_daily_pm$e1$nobs)
+
+twfe_indoor_sensor_seasonal_pm <- bind_rows(did_indoor_sensor_seasonal_pm$me_1,
+                                            did_indoor_sensor_seasonal_pm$me_2) %>% 
+  mutate(category = "Indoor", 
+         outcome = "Sensor-based seasonal PM2.5",
+         nobs = did_indoor_sensor_seasonal_pm$e1$nobs)
+
+twfe_outdoor_sensor_seasonal_pm <- bind_rows(did_outdoor_seasonal$me_1,
+                                            did_outdoor_seasonal$me_2) %>% 
+  mutate(category = "Outdoor", 
+         outcome = "Sensor-based seasonal PM2.5",
+         nobs = did_outdoor_seasonal$e1$nobs)
+
+twfe_outdoor_filter_bc <- bind_rows(did_outdoor_bc$me_1,
+                                            did_outdoor_bc$me_2) %>% 
+  mutate(category = "Outdoor", 
+         outcome = "Filter-based BC",
+         nobs = did_outdoor_bc$e1$nobs)
+
+# put all subtables together
+twfe_all <- bind_rows(twfe_personal_pm, twfe_personal_bc, 
+                       twfe_indoor_filter_pm, twfe_indoor_filter_bc, 
+                       twfe_indoor_sensor_24h_pm, twfe_indoor_sensor_seasonal_pm,
+                      twfe_outdoor_sensor_seasonal_pm, twfe_outdoor_filter_bc) %>%
+  mutate(model = rep(c(1,2), times=8)) %>%
+  select(model, nobs, estimate, conf.low, 
+    conf.high, category, outcome) %>%
+  relocate(category, outcome) %>%
+  mutate(ci = paste("(", sprintf("%.1f", conf.low), ", ",
+    sprintf("%.1f", conf.high), ")", sep="")) %>%
+  select(-conf.low, -conf.high) %>%
+  pivot_wider(names_from = model, values_from = 
+    c(estimate, ci), names_vary = "slowest")
+```
+
+### Make the plot
+
+```{r}
+#PM2.5
+twfe_all %>% 
+  select(-estimate_2, -ci_2) %>% 
+  rename(estimate = estimate_1, 
+         ci = ci_1) %>% 
+  mutate(method = "Unadjusted") %>% 
+  bind_rows(twfe_all %>% 
+  select(-estimate_1, -ci_1) %>% 
+  rename(estimate = estimate_2, 
+         ci = ci_2) %>% 
+  mutate(method = "Adjusted")) %>% 
+  filter(nobs != 216, 
+         nobs != 399, 
+         outcome != "Filter-based BC") %>% 
+  separate(col = ci, into = c("ci_lower", "ci_upper"), sep = ",") %>% 
+  mutate(pollutant = paste0(category, " ", outcome), 
+         pollutant = case_when(pollutant == "Outdoor Sensor-based seasonal PM2.5" ~ 
+                                 "Outdoor sensor-based seasonal PM2.5", 
+                               pollutant == "Indoor Sensor-based seasonal PM2.5" ~ 
+                                 "Indoor sensor-based seasonal PM2.5", 
+                               pollutant == "Personal Filter-based PM2.5" ~ 
+                                 "Personal filter-based PM2.5"), 
+         pollutant = factor(pollutant, levels = c("Outdoor sensor-based seasonal PM2.5", 
+                                                  
+                                                  "Indoor sensor-based seasonal PM2.5",
+                                                  
+                                                  "Personal filter-based PM2.5")), 
+         method = case_when(method == "Unadjusted" ~ "DiD", 
+                            method == "Adjusted" ~ "Adjusted DiD"), 
+         ci_lower = as.numeric(str_replace_all(ci_lower, "\\(", "")), 
+         ci_upper = as.numeric(str_replace_all(ci_upper, "\\)", ""))) %>% 
+  ggplot(aes(x = estimate, y = method)) + 
+  geom_point(size = 4, stroke = 1.5, shape = 1) + 
+  geom_errorbar(aes(xmin = ci_lower, xmax = ci_upper), 
+                size = 1, position=position_dodge(0.7), width = 0.15) + 
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey") + 
+  scale_shape_manual(values = c(0, 1)) + 
+  facet_wrap(~pollutant, ncol = 1) + 
+  theme_bw() + 
+  theme(panel.spacing.x = unit(0.3,"line"), 
+        strip.text = element_text(size = 16), 
+        strip.background = element_rect(color="black", fill = "white", size=0.8, linetype="solid"), 
+        axis.title = element_text(size=16, color="black"),
+        axis.text.x = element_text(size = 14, color = "black"), 
+        axis.text.y = element_text(size = 16, color = "black"), 
+        panel.border = element_rect(size = 1, colour = "black"),
+        axis.ticks.length = unit(0.15, "cm"), 
+        axis.ticks = element_line(color = "black", linewidth = 0.6), 
+        legend.position = "top", 
+        legend.background = element_blank(), 
+        legend.title = element_blank(), 
+        legend.key.size = unit(0.8, "cm"), 
+        legend.text = element_text(size = 16, color = "black"), 
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_line(linetype = "dashed", color = "grey"), 
+        panel.grid.minor = element_blank()) + 
+  labs(x = bquote(Mean~change~"in"~concentration~'(μg' ~ m^-3*')'), y = "")
+ggsave("../figure/etwfe_PM2.5.png", width = 6, height = 8)
+
+#BC
+twfe_all %>% 
+  select(-estimate_2, -ci_2) %>% 
+  rename(estimate = estimate_1, 
+         ci = ci_1) %>% 
+  mutate(method = "Unadjusted") %>% 
+  bind_rows(twfe_all %>% 
+  select(-estimate_1, -ci_1) %>% 
+  rename(estimate = estimate_2, 
+         ci = ci_2) %>% 
+  mutate(method = "Adjusted")) %>% 
+  filter(nobs != 216, 
+         nobs != 399, 
+         outcome == "Filter-based BC") %>% 
+  separate(col = ci, into = c("ci_lower", "ci_upper"), sep = ",") %>% 
+  mutate(pollutant = paste0(category, " ", outcome), 
+         pollutant = case_when(pollutant == "Outdoor Filter-based BC" ~ 
+                                 "Outdoor filter-based BC", 
+                               pollutant == "Indoor Filter-based BC" ~ 
+                                 "Indoor filter-based BC", 
+                               pollutant == "Personal Filter-based BC" ~ 
+                                 "Personal filter-based BC"), 
+         pollutant = factor(pollutant, levels = c("Outdoor filter-based BC",
+                                                  "Indoor filter-based BC", 
+                                                  "Personal filter-based BC")), 
+         method = case_when(method == "Unadjusted" ~ "DiD", 
+                            method == "Adjusted" ~ "Adjusted DiD"), 
+         ci_lower = as.numeric(str_replace_all(ci_lower, "\\(", "")), 
+         ci_upper = as.numeric(str_replace_all(ci_upper, "\\)", ""))) %>% 
+  ggplot(aes(x = estimate, y = method)) + 
+  geom_point(size = 4, stroke = 1.5, shape = 1) + 
+  geom_errorbar(aes(xmin = ci_lower, xmax = ci_upper), 
+                size = 1, position=position_dodge(0.7), width = 0.15) + 
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey") + 
+  scale_shape_manual(values = c(0, 1)) + 
+  facet_wrap(~pollutant, ncol = 1) + 
+  theme_bw() + 
+  theme(panel.spacing.x = unit(0.3,"line"), 
+        strip.text = element_text(size = 16), 
+        strip.background = element_rect(color="black", fill = "white", size=0.8, linetype="solid"), 
+        axis.title = element_text(size=16, color="black"),
+        axis.text.x = element_text(size = 14, color = "black"), 
+        axis.text.y = element_text(size = 16, color = "black"), 
+        panel.border = element_rect(size = 1, colour = "black"),
+        axis.ticks.length = unit(0.15, "cm"), 
+        axis.ticks = element_line(color = "black", linewidth = 0.6), 
+        legend.position = "top", 
+        legend.background = element_blank(), 
+        legend.title = element_blank(), 
+        legend.key.size = unit(0.8, "cm"), 
+        legend.text = element_text(size = 16, color = "black"), 
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_line(linetype = "dashed", color = "grey"), 
+        panel.grid.minor = element_blank()) + 
+  labs(x = bquote(Mean~change~"in"~concentration~'(μg' ~ m^-3*')'), y = "")
+ggsave("../figure/etwfe_BC.png", width = 6, height = 8)
+```
+
+## Sensitivity analysis
+
+### Plot-indoor 24-h
+
+```{r}
+twfe_all %>% 
+  select(-estimate_2, -ci_2) %>% 
+  rename(estimate = estimate_1, 
+         ci = ci_1) %>% 
+  mutate(method = "Unadjusted") %>% 
+  bind_rows(twfe_all %>% 
+  select(-estimate_1, -ci_1) %>% 
+  rename(estimate = estimate_2, 
+         ci = ci_2) %>% 
+  mutate(method = "Adjusted")) %>% 
+  filter(nobs %in% c(216, 399)) %>% 
+  separate(col = ci, into = c("ci_lower", "ci_upper"), sep = ",") %>% 
+  mutate(pollutant = paste0(category, " ", outcome), 
+         pollutant = case_when(pollutant == "Indoor Filter-based PM2.5" ~ 
+                                 "Indoor filter-based PM2.5", 
+                               pollutant == "Indoor Sensor-based 24-h PM2.5" ~ 
+                                 "Indoor sensor-based 24-h PM2.5"), 
+         pollutant = factor(pollutant, levels = c("Indoor filter-based PM2.5",
+                                                  "Indoor sensor-based 24-h PM2.5")), 
+         method = case_when(method == "Unadjusted" ~ "DiD", 
+                            method == "Adjusted" ~ "Adjusted DiD"), 
+         ci_lower = as.numeric(str_replace_all(ci_lower, "\\(", "")), 
+         ci_upper = as.numeric(str_replace_all(ci_upper, "\\)", ""))) %>% 
+  ggplot(aes(x = estimate, y = method)) + 
+  geom_point(shape = 1, size = 4, stroke = 1.5) + 
+  geom_errorbar(aes(xmin = ci_lower, xmax = ci_upper), 
+                size = 1, position=position_dodge(0.7), width = 0.15) + 
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey") + 
+  scale_shape_manual(values = c(0, 1)) + 
+  facet_wrap(~pollutant, ncol = 2) + 
+  theme_bw() + 
+  theme(panel.spacing.x = unit(0.3,"line"), 
+        strip.text = element_text(size = 16), 
+        strip.background = element_rect(color="black", fill = "white", size=0.8, linetype="solid"), 
+        axis.title = element_text(size=16, color="black"),
+        axis.text.x = element_text(size = 16, color = "black"), 
+        axis.text.y = element_text(size = 16, color = "black"), 
+        panel.border = element_rect(size = 1, colour = "black"),
+        axis.ticks.length = unit(0.15, "cm"), 
+        axis.ticks = element_line(color = "black", linewidth = 0.6), 
+        legend.position = "top", 
+        legend.background = element_blank(), 
+        legend.title = element_blank(), 
+        legend.key.size = unit(0.8, "cm"), 
+        legend.text = element_text(size = 16, color = "black"), 
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_line(linetype = "dashed", color = "grey"), 
+        panel.grid.minor = element_blank()) + 
+  labs(x = bquote(Mean~change~"in"~concentration~'(μg' ~ m^-3*')'), y = "")
+ggsave("../figure/etwfe_indoor 24-h.png", width = 9, height = 4)
+```
+
+### heterogeneous treatment effects
+
+```{r}
+# tables of results by outcome for outdoor
+heter_outdoor_pm <- bind_rows(did_outdoor_seasonal$me_2, did_outdoor_seasonal$meh_2) %>% 
+  mutate(outcome = "PM2.5")
+  
+heter_outdoor_bc <- bind_rows(did_outdoor_bc$me_2, did_outdoor_bc$meh_2) %>% 
+  mutate(outcome = "BC")
+
+heter_outdoor <- bind_rows(heter_outdoor_pm, heter_outdoor_bc) %>%
+  select(outcome, estimate, conf.low, conf.high, 
+         treatment_year, field_year) %>%
+  mutate_at(vars(c(treatment_year,field_year)), ~ recode(., 
+         `2019` = "2019",
+         `2020` = "2020",
+         `2021` = "2021",
+         .missing = "All")) %>%
+  relocate(outcome, treatment_year,field_year) %>%
+  mutate(ci = paste("(", sprintf("%.1f", conf.low), ", ",
+    sprintf("%.1f", conf.high), ")", sep="")) %>%
+  select(-conf.low, -conf.high) %>%
+  pivot_wider(names_from = outcome, values_from = 
+    c(estimate, ci), names_vary = "slowest")
+
+# tables of results by outcome for personal
+heter_personal_pm <- bind_rows(did_personal_pm$me_2, did_personal_pm$meh_2) %>% 
+  mutate(outcome = "PM2.5")
+  
+heter_personal_bc <- bind_rows(did_personal_bc$me_2, did_personal_bc$meh_2) %>% 
+  mutate(outcome = "BC")
+
+heter_personal <- bind_rows(heter_personal_pm, heter_personal_bc) %>%
+  select(outcome, estimate, conf.low, conf.high, 
+         treatment_year, field_year) %>%
+  mutate_at(vars(c(treatment_year,field_year)), ~ recode(., 
+         `2019` = "2019",
+         `2020` = "2020",
+         `2021` = "2021",
+         .missing = "All")) %>%
+  relocate(outcome, treatment_year,field_year) %>%
+  mutate(ci = paste("(", sprintf("%.1f", conf.low), ", ",
+    sprintf("%.1f", conf.high), ")", sep="")) %>%
+  select(-conf.low, -conf.high) %>%
+  pivot_wider(names_from = outcome, values_from = 
+    c(estimate, ci), names_vary = "slowest")
+
+# tables of results by outcome for indoor
+heter_indoor_filter_pm <- bind_rows(did_indoor_filter_pm$me_2, 
+                                        did_indoor_filter_pm$meh_2) %>% 
+  mutate(outcome = "Filter-based PM2.5")
+
+heter_indoor_filter_bc <- bind_rows(did_indoor_filter_bc$me_2, did_indoor_filter_bc$meh_2) %>% 
+  mutate(outcome = "Filter-based BC")
+
+heter_indoor_sensor_24h_pm <- bind_rows(did_indoor_sensor_daily_pm$me_2, 
+                                        did_indoor_sensor_daily_pm$meh_2) %>% 
+  mutate(outcome = "Sensor-based 24-h PM2.5")
+
+heter_indoor_sensor_seasonal_pm <- bind_rows(did_indoor_sensor_seasonal_pm$me_2, 
+                                             did_indoor_sensor_seasonal_pm$meh_2) %>% 
+  mutate(outcome = "Sensor-based seasonal PM2.5")
+
+heter_indoor <- bind_rows(heter_indoor_filter_pm, heter_indoor_filter_bc, 
+                          heter_indoor_sensor_24h_pm, heter_indoor_sensor_seasonal_pm) %>%
+  select(outcome, estimate, conf.low, conf.high, 
+         treatment_year,field_year) %>%
+  mutate_at(vars(c(treatment_year,field_year)), ~ recode(., 
+         `2020` = "2020",
+         `2021` = "2021",
+         .missing = "All")) %>%
+  relocate(outcome, treatment_year,field_year) %>%
+  mutate(ci = paste("(", sprintf("%.1f", conf.low), ", ",
+    sprintf("%.1f", conf.high), ")", sep="")) %>%
+  select(-conf.low, -conf.high) %>%
+  pivot_wider(names_from = outcome, values_from = 
+    c(estimate, ci), names_vary = "slowest")
+
+heter <- heter_personal %>% 
+  select(-estimate_BC, -ci_BC) %>% 
+  rename(estimate = estimate_PM2.5, 
+         ci = ci_PM2.5) %>% 
+  mutate(pollutant = "Personal filter-based PM2.5") %>% 
+  bind_rows(heter_personal %>% 
+  select(-estimate_PM2.5, -ci_PM2.5) %>% 
+  rename(estimate = estimate_BC, 
+         ci = ci_BC) %>% 
+  mutate(pollutant = "Personal filter-based BC")) %>% 
+  bind_rows(heter_indoor %>% 
+              select(treatment_year, field_year, `estimate_Filter-based PM2.5`, 
+                     `ci_Filter-based PM2.5`) %>% 
+              rename(estimate = `estimate_Filter-based PM2.5`, 
+                     ci = `ci_Filter-based PM2.5`) %>% 
+              mutate(pollutant = "Indoor filter-based PM2.5")) %>% 
+  bind_rows(heter_indoor %>% 
+              select(treatment_year, field_year, `estimate_Filter-based BC`, 
+                     `ci_Filter-based BC`) %>% 
+              rename(estimate = `estimate_Filter-based BC`, 
+                     ci = `ci_Filter-based BC`) %>% 
+              mutate(pollutant = "Indoor filter-based BC")) %>% 
+  bind_rows(heter_indoor %>% 
+              select(treatment_year, field_year, `estimate_Sensor-based 24-h PM2.5`, 
+                     `ci_Sensor-based 24-h PM2.5`) %>% 
+              rename(estimate = `estimate_Sensor-based 24-h PM2.5`, 
+                     ci = `ci_Sensor-based 24-h PM2.5`) %>% 
+              mutate(pollutant = "Indoor sensor-based 24-h PM2.5")) %>% 
+  bind_rows(heter_indoor %>% 
+              select(treatment_year, field_year, `estimate_Sensor-based seasonal PM2.5`, 
+                     `ci_Sensor-based seasonal PM2.5`) %>% 
+              rename(estimate = `estimate_Sensor-based seasonal PM2.5`, 
+                     ci = `ci_Sensor-based seasonal PM2.5`) %>% 
+              mutate(pollutant = "Indoor sensor-based seasonal PM2.5"))
+write.csv(heter, "../data_processed/heterogeneous.csv")
+```
+
+### Impact of removing fixed effects
+
+#### Personal PM
+
+```{r}
+# adjusted ETWFE model
+pe_etwfe <- fixest::feglm(
+  PM25conc_exposureugm3 ~ 
+    treatment:treatment_year_2019:field_year_2019 + 
+    treatment:treatment_year_2019:field_year_2021 + 
+    treatment:treatment_year_2020:field_year_2021 + 
+    treatment:treatment_year_2021:field_year_2021 +
+    hh_num + ptc_smoking_former + ptc_smoking_lived +
+    ptc_smoking_none + ns(out_temp, df=2) + 
+    ns(out_dew, df=2) | treatment_year + field_year, 
+  data = df_master_personal_pm, cluster = ~ID_VILLAGE,
+  family = Gamma(link = "log"))
+
+pe_etwfe_me <- slopes(pe_etwfe, 
+  newdata = subset(df_master_personal_pm, treatment==1), 
+  variables = "treatment", by = "treatment") %>% 
+  mutate(method = "ETWFE")
+
+# no year FE
+pe_etwfe_ny <- fixest::feglm(
+  PM25conc_exposureugm3 ~ 
+    treatment:treatment_year_2019:field_year_2019 + 
+    treatment:treatment_year_2019:field_year_2021 + 
+    treatment:treatment_year_2020:field_year_2021 + 
+    treatment:treatment_year_2021:field_year_2021 +
+    hh_num + ptc_smoking_former + ptc_smoking_lived +
+    ptc_smoking_none + ns(out_temp, df=2) + 
+    ns(out_dew, df=2) | treatment_year, 
+  data = df_master_personal_pm, cluster = ~ID_VILLAGE,
+  family = Gamma(link = "log"))
+
+pe_etwfe_ny_me <- slopes(pe_etwfe_ny, 
+  newdata = subset(df_master_personal_pm, treatment==1), 
+  variables = "treatment", by = "treatment") %>% 
+  mutate(method = "No wave effect")
+
+# no group FE
+pe_etwfe_ng <- fixest::feglm(
+  PM25conc_exposureugm3 ~ 
+    treatment:treatment_year_2019:field_year_2019 + 
+    treatment:treatment_year_2019:field_year_2021 + 
+    treatment:treatment_year_2020:field_year_2021 + 
+    treatment:treatment_year_2021:field_year_2021 +
+    hh_num + ptc_smoking_former + ptc_smoking_lived +
+    ptc_smoking_none + ns(out_temp, df=2) + 
+    ns(out_dew, df=2) | field_year, 
+  data = df_master_personal_pm, cluster = ~ID_VILLAGE,
+  family = Gamma(link = "log"))
+
+pe_etwfe_ng_me <- slopes(pe_etwfe_ng, 
+  newdata = subset(df_master_personal_pm, treatment==1), 
+  variables = "treatment", by = "treatment") %>% 
+  mutate(method = "No treatment year effect")
+
+# no group or year FE
+pe_etwfe_nfe <- fixest::feglm(
+  PM25conc_exposureugm3 ~ 
+    treatment:treatment_year_2019:field_year_2019 + 
+    treatment:treatment_year_2019:field_year_2021 + 
+    treatment:treatment_year_2020:field_year_2021 + 
+    treatment:treatment_year_2021:field_year_2021 +
+    hh_num + ptc_smoking_former + ptc_smoking_lived +
+    ptc_smoking_none + ns(out_temp, df=2) + 
+    ns(out_dew, df=2), 
+  data = df_master_personal_pm, cluster = ~ID_VILLAGE,
+  family = Gamma(link = "log"))
+
+pe_etwfe_nfe_me <- slopes(pe_etwfe_nfe, 
+  newdata = subset(df_master_personal_pm, treatment==1), 
+  variables = "treatment", by = "treatment") %>% 
+  mutate(method = "No fixed effect")
+
+personal_etwfe_nfe <- bind_rows(pe_etwfe_me, pe_etwfe_ny_me, pe_etwfe_ng_me, pe_etwfe_nfe_me)
+
+write.csv(personal_etwfe_nfe, "../data_processed/no fixed effect_personal PM.csv")
+```
+
+#### Personal BC
+
+```{r}
+# adjusted ETWFE model
+pe_etwfe <- fixest::feglm(
+  BCconc_exposureugm3 ~ 
+    treatment:treatment_year_2019:field_year_2019 + 
+    treatment:treatment_year_2019:field_year_2021 + 
+    treatment:treatment_year_2020:field_year_2021 + 
+    treatment:treatment_year_2021:field_year_2021 +
+    hh_num + ptc_smoking_former + ptc_smoking_lived +
+    ptc_smoking_none + ns(out_temp, df=2) + 
+    ns(out_dew, df=2) | treatment_year + field_year, 
+  data = df_master_personal_bc, cluster = ~ID_VILLAGE,
+  family = Gamma(link = "log"))
+
+pe_etwfe_me <- slopes(pe_etwfe, 
+  newdata = subset(df_master_personal_bc, treatment==1), 
+  variables = "treatment", by = "treatment") %>% 
+  mutate(method = "ETWFE")
+
+# no year FE
+pe_etwfe_ny <- fixest::feglm(
+  BCconc_exposureugm3 ~ 
+    treatment:treatment_year_2019:field_year_2019 + 
+    treatment:treatment_year_2019:field_year_2021 + 
+    treatment:treatment_year_2020:field_year_2021 + 
+    treatment:treatment_year_2021:field_year_2021 +
+    hh_num + ptc_smoking_former + ptc_smoking_lived +
+    ptc_smoking_none + ns(out_temp, df=2) + 
+    ns(out_dew, df=2) | treatment_year, 
+  data = df_master_personal_bc, cluster = ~ID_VILLAGE,
+  family = Gamma(link = "log"))
+
+pe_etwfe_ny_me <- slopes(pe_etwfe_ny, 
+  newdata = subset(df_master_personal_pm, treatment==1), 
+  variables = "treatment", by = "treatment") %>% 
+  mutate(method = "No wave effect")
+
+# no group FE
+pe_etwfe_ng <- fixest::feglm(
+  BCconc_exposureugm3 ~ 
+    treatment:treatment_year_2019:field_year_2019 + 
+    treatment:treatment_year_2019:field_year_2021 + 
+    treatment:treatment_year_2020:field_year_2021 + 
+    treatment:treatment_year_2021:field_year_2021 +
+    hh_num + ptc_smoking_former + ptc_smoking_lived +
+    ptc_smoking_none + ns(out_temp, df=2) + 
+    ns(out_dew, df=2) | field_year, 
+  data = df_master_personal_bc, cluster = ~ID_VILLAGE,
+  family = Gamma(link = "log"))
+
+pe_etwfe_ng_me <- slopes(pe_etwfe_ng, 
+  newdata = subset(df_master_personal_pm, treatment==1), 
+  variables = "treatment", by = "treatment") %>% 
+  mutate(method = "No treatment year effect")
+
+# no group or year FE
+pe_etwfe_nfe <- fixest::feglm(
+  BCconc_exposureugm3 ~ 
+    treatment:treatment_year_2019:field_year_2019 + 
+    treatment:treatment_year_2019:field_year_2021 + 
+    treatment:treatment_year_2020:field_year_2021 + 
+    treatment:treatment_year_2021:field_year_2021 +
+    hh_num + ptc_smoking_former + ptc_smoking_lived +
+    ptc_smoking_none + ns(out_temp, df=2) + 
+    ns(out_dew, df=2), 
+  data = df_master_personal_bc, cluster = ~ID_VILLAGE,
+  family = Gamma(link = "log"))
+
+pe_etwfe_nfe_me <- slopes(pe_etwfe_nfe, 
+  newdata = subset(df_master_personal_bc, treatment==1), 
+  variables = "treatment", by = "treatment") %>% 
+  mutate(method = "No fixed effect")
+
+personal_etwfe_nfe <- bind_rows(pe_etwfe_me, pe_etwfe_ny_me, pe_etwfe_ng_me, pe_etwfe_nfe_me)
+
+write.csv(personal_etwfe_nfe, "../data_processed/no fixed effect——personal BC.csv")
+```
+
+### Adjust for district
+
+```{r}
+# personal adding district
+rhs_didad <- c(rhs_did, "hh_num", "ptc_smoking_former",
+  "ptc_smoking_lived", "ptc_smoking_none", 
+  "ns(out_temp, df=2)", 
+  "ns(out_dew, df=2)", "factor(ID_COUNTY)")
+
+# indoor adding district
+rhs_didiad <- c(rhs_didi, "hh_num", "hh_smoking_former",
+  "hh_smoking_none",
+  "ns(out_temp, df=2)", 
+  "ns(out_dew, df=2)", "factor(ID_COUNTY)")
+
+# personal PM
+m_ppm_d <- estimate_etwfe(lhs="PM25conc_exposureugm3", 
+  rhs1=rhs_dida, rhs2=rhs_didad, 
+  data=df_master_personal_pm)
+
+# ETWFE and adjusted ETWFE models for black carbon
+m_pbc_d <- estimate_etwfe(lhs="BCconc_exposureugm3", 
+  rhs1=rhs_dida, rhs2=rhs_didad, 
+  data=df_master_personal_bc)
+
+# ETWFE and adjusted ETWFE models for indoor daily
+m_i24_d <- estimate_etwfe(lhs="PM25_indoor_filter", 
+  rhs1=rhs_didia, rhs2=rhs_didiad, 
+  data=df_master_indoor_filter_pm)
+
+# ETWFE and adjusted ETWFE models for indoor seasonal
+m_is_d <- estimate_etwfe(lhs="PM25_indoor_seasonal_hs", 
+  rhs1=rhs_didia, rhs2=rhs_didiad, 
+  data=df_master_indoor_sensor_seasonal_pm)
+
+# ETWFE and adjusted ETWFE models for indoor BC
+m_ibc_d <- estimate_etwfe(lhs="BC_indoor_conc", 
+  rhs1=rhs_didia, rhs2=rhs_didiad, 
+  data=df_master_indoor_filter_bc)
+
+# write model results to output folder
+write_rds(m_ppm_d, file = here("outputs/models", "m_ppm.rds"))
+
+write_rds(m_pbc_d, file = here("outputs/models", "m_pbc.rds"))
+
+write_rds(m_i24_d, file = here("outputs/models", "m_i24.rds"))
+
+write_rds(m_is_d, file = here("outputs/models", "m_is.rds"))
+
+write_rds(m_ibc_d, file = here("outputs/models", "m_ibc.rds"))
+```
+
+### Adding Wave-3 indoor data
+
+```{r}
+# read in wave 3 data
+d_ind_s3 <- read.csv("../data_raw/indoor_pm_S3.csv") %>% 
+  filter(N_percent_indoor_seasonal_hs >= 0.2) %>%
+  select(hh_id, wave, ID_VILLAGE, coal_ban_time, pm2.5_indoor_seasonal_hs) %>%
+  mutate(wave = 3,
+    ban_status_composite = case_when(
+      coal_ban_time == "2019" ~ 1, 
+      coal_ban_time == "2020" ~ 2, 
+      coal_ban_time == "2021" ~ 3, 
+      coal_ban_time == "Not Yet" ~ 0)) %>%
+  rename(PM25_indoor_seasonal_hs = pm2.5_indoor_seasonal_hs) %>%
+  select(hh_id, wave, ID_VILLAGE, 
+    ban_status_composite, PM25_indoor_seasonal_hs)
+
+# add to indoor seasonal
+d_is_s3_add <- df_master_indoor_sensor_seasonal_pm %>%
+  select(hh_id, wave, ID_VILLAGE,
+    ban_status_composite,
+    PM25_indoor_seasonal_hs) %>%
+  bind_rows(d_ind_s3) %>%
+  mutate(year = if_else(wave==2, 2019, 
+      if_else(wave== 3, 2020,
+      if_else(wave== 4, 2021, 0))),
+    cohort_year = if_else(
+      ban_status_composite==1, 2019, 
+      if_else(ban_status_composite==2, 2020, 
+              if_else(ban_status_composite==3, 2021, 2022))),
+    treat = ifelse(year >= cohort_year, 1, 0),
+    cohort_year = ifelse(cohort_year == 2022,-Inf, 
+                         cohort_year)) %>%
+  # relabel last cohort year 
+  # treatment cohort dummies
+  add_dummy_variables(cohort_year, 
+    values=c(-Inf,2019,2020,2021), 
+    remove_original = F) %>%
+  # wave dummies
+  add_dummy_variables(year, 
+    values=c(2018,2019,2020,2021), 
+    remove_original = F) %>%
+  
+  group_by(ID_VILLAGE) %>%
+  mutate(v_id = cur_group_id()) %>%
+  ungroup() %>%
+  # restrict to cohorts treated after 2019
+  # since no data in 2018
+  filter(cohort_year_2019!=1)
+
+# ETWFE model estimates including Season 3
+m_is_s3 <- fixest::feglm(
+  PM25_indoor_seasonal_hs ~ treat:cohort_year_2020:year_2020 + 
+    treat:cohort_year_2020:year_2021 +
+    treat:cohort_year_2021:year_2021 + cohort_year_2020 + 
+    cohort_year_2021 + year_2021, 
+  cluster = ~v_id, data=d_is_s3_add, 
+  family = Gamma(link = "log"))
+
+# overall marginal effect
+m_is_s3_me <- slopes(
+  m_is_s3,
+  newdata = subset(d_is_s3_add, treat==1),
+  variables = "treat", by = "treat")
+
+# heterogeneous ATTs
+m_is_s3_meh <- slopes(
+  m_is_s3,
+  newdata = subset(d_is_s3_add, treat==1),
+  variables = "treat",
+  by = c("cohort_year", "year"))
+  
+
+# estimates without Season 3
+m_is_nos3 <- fixest::feglm(
+  PM25_indoor_seasonal_hs ~ treat:cohort_year_2020:year_2020 + 
+    treat:cohort_year_2020:year_2021 +
+    treat:cohort_year_2021:year_2021 + cohort_year_2020 + 
+    cohort_year_2021 + year_2021, 
+  cluster = ~v_id, data=subset(d_is_s3_add, 
+    wave != 3), family = Gamma(link = "log"))
+
+# overall marginal effect
+m_is_nos3_me <- slopes(
+  m_is_nos3,
+  newdata = subset(d_is_s3_add, wave != 3 & treat==1),
+  variables = "treat", by = "treat")
+
+# heterogeneous ATTs
+m_is_nos3_meh <- slopes(
+  m_is_nos3,
+  newdata = subset(d_is_s3_add, wave != 3 & treat==1),
+  variables = "treat",
+  by = c("cohort_year", "year"))
+
+# Put together the table
+ap_ind_s3 <- bind_rows(m_is_s3_me , m_is_s3_meh) %>% 
+  mutate(outcome = "wS3",
+         nobs = m_is_s3$nobs)
+
+ap_ind_nos3 <- bind_rows(m_is_nos3_me, m_is_nos3_meh) %>% 
+  mutate(outcome = "woS3",
+         nobs = m_is_nos3$nobs)
+
+ap_is3_table <- bind_rows(ap_ind_s3, ap_ind_nos3) %>%
+  select(outcome, nobs, estimate, conf.low, conf.high, 
+         cohort_year, year) %>%
+  mutate_at(vars(c(cohort_year,year)), ~ recode(., 
+         `2019` = "2019",
+         `2020` = "2020",
+         `2021` = "2021",
+         .missing = "All")) %>%
+  relocate(outcome, cohort_year, year, nobs) %>%
+  mutate(ci = paste("(", sprintf("%.1f", conf.low), ", ",
+    sprintf("%.1f", conf.high), ")", sep="")) %>%
+  select(-conf.low, -conf.high) %>%
+  pivot_wider(names_from = outcome, values_from = 
+    c(nobs, estimate, ci), names_vary = "slowest")
+
+# write table to data
+write_rds(ap_is3_table, file = here("outputs", 
+  "ap-is3_table.rds"))
+```
+
+### Outdoor sensor-derived seasonal PM2.5 with wave 3 !NEW!
+
+```{r}
+# model statement outdoor sensor
+rhs_did_outdoor_sensor <- c(rhs_did, "ns(temp, df = 2)", "ns(ws, df = 2)",
+  "wdir")
+
+# model
+did_outdoor_seasonal_w3 <- estimate_etwfe(lhs="pm2.5", 
+                                  rhs1=rhs_did, rhs2=rhs_did_outdoor_sensor, 
+                                  data=df_master_outdoor_sensor_seasonal_pm)
+
+write_rds(did_outdoor_seasonal_w3, "../data_processed/did_outdoor_seasonal_w3.rds")
+```
+
+### Village density plot- !NEW!
+
+```{r}
+df_master_density <- df_master_outdoor_bc %>% 
+  filter(wave %in% c(1,2)) %>% 
+  left_join(density) %>% 
+  mutate(n_ban_s1_20k = case_when(village == "Nianziwan2" ~ 22,
+                                  TRUE ~ n_ban_s1_20k),
+         n_ban_s2_20k = case_when(village == "Nianziwan2" ~ 9,
+                                  TRUE ~ n_ban_s2_20k),
+         n_tot_20k = case_when(village == "Nianziwan2" ~ 14,
+                               TRUE ~ n_ban_s1_20k),
+         n_ban_20k = case_when(wave == 1 ~ n_ban_s1_20k,
+                               wave == 2 ~ n_ban_s2_20k),
+         prop_ban_20k = n_ban_20k/n_tot_20k) %>% 
+  select(village, ban_enter, wave, n_ban_20k, n_tot_20k, prop_ban_20k,
+         n_ban_s1_20k) %>% 
+  distinct()
+
+df_master_density %>% 
+  mutate(wave = case_when(wave == 1 ~ "Wave 1", 
+                          wave == 2 ~ "Wave 2"), 
+         ban_enter = case_when(ban_enter == "treated in year 2" ~ "Treated Wave 2", 
+                               ban_enter == "treated in year 3" ~ "Treated Wave 3", 
+                               ban_enter == "treated in year 4" ~ "Treated Wave 4", 
+                               ban_enter == "untreated" ~ "Untreated")) %>% 
+  ggplot(aes(y = n_ban_20k, x = as.factor(wave))) +
+  geom_boxplot() +
+  facet_wrap(~ban_enter) +
+  theme_bw() + 
+  theme(strip.text = element_text(size = 12), 
+        strip.background = element_rect(color="black", fill = "white", 
+                                        size=0.8, linetype="solid"), 
+        axis.title = element_text(size=12, color="black"),
+        axis.text.x = element_text(size = 12, color = "black"), 
+        axis.text.y = element_text(size = 12, color = "black"), 
+        panel.border = element_rect(size = 1, colour = "black"),
+        axis.ticks.length = unit(0.15, "cm"), 
+        axis.ticks = element_line(color = "black", linewidth = 0.6), 
+        legend.position = "top", 
+        legend.background = element_blank(), 
+        legend.title = element_blank(), 
+        legend.key.size = unit(0.8, "cm"), 
+        legend.text = element_text(size = 12, color = "black"), 
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_blank(), 
+        panel.grid.minor = element_blank()) + 
+  labs(x = "Study wave",
+       y = "Number of villages enrolled in CHP within 20km")
+ggsave("../figure/village_density.png", width = 8, height = 5)
+```
+
+### Impacts of removing Fangshan for outdoor !NEW!
+
+```{r}
+# BC
+etwfe_adj_out_filter_bc_noFangshan <- fixest::feglm(
+  bc_m3 ~ treatment:treatment_year_2019:field_year_2019 + 
+    treatment:treatment_year_2019:field_year_2021 + 
+    treatment:treatment_year_2020:field_year_2021 + 
+    treatment:treatment_year_2021:field_year_2021 + 
+    ws + wdir + n_hh|
+    
+    factor(treatment_year) + 
+    factor(field_year) +
+    factor(district),
+  
+  data = df_master_outdoor_bc %>% filter(district != "Fangshan"),
+  vcov = ~ID_VILLAGE,
+  family = Gamma(link = "log"))
+
+etwfe_adj_out_filter_bc_noFangshan_me <- slopes(etwfe_adj_out_filter_bc_noFangshan,
+       variables = "treatment",
+       by = "treatment") %>% 
+  tail(-1) %>% 
+  mutate(method = "No Fangshan",
+         pollutant = "Outdoor filter-based BC")
+
+# Seasonal PM2.5
+etwfe_adj_out_seasonal_noFangshan <- fixest::feglm(
+  pm2.5 ~ treatment:treatment_year_2019:field_year_2019 + 
+    treatment:treatment_year_2019:field_year_2021 + 
+    treatment:treatment_year_2020:field_year_2021 + 
+    treatment:treatment_year_2021:field_year_2021 +
+    ns(temp, df = 2) + ns(ws, df = 2) + wdir|
+    
+    factor(treatment_year) + 
+    factor(field_year) +
+    factor(district),
+  
+  data = df_master_outdoor_sensor_seasonal_pm %>% filter(district != "Fangshan"),
+  vcov = ~ID_VILLAGE,
+  family = Gamma(link = "log"))
+
+etwfe_adj_out_seasonal_noFangshan_me <- slopes(etwfe_adj_out_seasonal_noFangshan,
+       variables = "treatment",
+       by = "treatment") %>% 
+  tail(-1) %>% 
+  mutate(method = "No Fangshan",
+         pollutant = "Outdoor sensor-based seasonal PM2.5")
+
+outdoor_etwfe_noFangshan <- bind_rows(etwfe_adj_out_filter_bc_noFangshan_me, etwfe_adj_out_seasonal_noFangshan_me)
+
+write.csv(outdoor_etwfe_noFangshan, "../data_processed/outdoor_noFangshan.csv")
+
+```
+
+# 5. Cost effect analysis
+
+```{r}
+df_personal_pm_cost <- df_master %>% 
+  dplyr::filter(p_usable_pm == 1) %>% 
+  dplyr::mutate(wave = case_when(wave == "1" ~ "W1", 
+                                 wave == "2" ~ "W2", 
+                                 wave == "4" ~ "W4"), 
+                ban_status = case_when(ban_status_composite == 0 ~ "Untreated", 
+                                       ban_status_composite == 1 ~ "Treated Wave 2", 
+                                       ban_status_composite == 2 ~ "Treated Wave 3", 
+                                       ban_status_composite == 3 ~ "Treated Wave 4"), 
+                Quantity_Briquettes = ifelse(is.na(Quantity_Briquettes), 
+                                             0, Quantity_Briquettes), 
+                Quantity_coal = ifelse(is.na(Quantity_coal), 0, Quantity_coal), 
+                Quantity_Wood = ifelse(is.na(Quantity_Wood), 0, Quantity_Wood/1000), 
+                ELE_winter_est = ifelse(is.na(ELE_winter_est), 0, ELE_winter_est), 
+                Quantity_coal = Quantity_Briquettes + Quantity_coal) %>% 
+  dplyr::select(hh_id, wave, ban_status, wealth_index, Quantity_coal, Quantity_Wood, 
+                ELE_winter_est, PM25conc_exposureugm3) %>% 
+  pivot_wider(names_from  = "wave", 
+              values_from = c("ban_status", "wealth_index", "Quantity_coal", "Quantity_Wood", 
+                              "ELE_winter_est", "PM25conc_exposureugm3")) %>% 
+  dplyr::mutate(ban_status = 
+                  ifelse(is.na(ban_status_W2), ban_status_W4, ban_status_W2), 
+                delta_coal_1 = Quantity_coal_W2 - Quantity_coal_W1, 
+                delta_wood_1 = Quantity_Wood_W2 - Quantity_Wood_W1, 
+                delta_ele_1 = ELE_winter_est_W2 - ELE_winter_est_W1, 
+                delta_conc_1 = PM25conc_exposureugm3_W2 - PM25conc_exposureugm3_W1, 
+                delta_coal_2 = Quantity_coal_W4 - Quantity_coal_W2, 
+                delta_wood_2 = Quantity_Wood_W4 - Quantity_Wood_W2, 
+                delta_ele_2 = ELE_winter_est_W4 - ELE_winter_est_W2, 
+                delta_conc_2 = PM25conc_exposureugm3_W4 - PM25conc_exposureugm3_W2, 
+                WI_1 = (wealth_index_W1 + wealth_index_W2)/2, 
+                WI_2 = (wealth_index_W2 + wealth_index_W4)/2) %>% 
+  dplyr::select(-ban_status_W1, -ban_status_W2, -ban_status_W4, 
+                -wealth_index_W1, -wealth_index_W2, -wealth_index_W4,
+                -Quantity_coal_W1, -Quantity_coal_W2, -Quantity_coal_W4, 
+                -Quantity_Wood_W1, -Quantity_Wood_W2, -Quantity_Wood_W4, 
+                -ELE_winter_est_W1, -ELE_winter_est_W2, -ELE_winter_est_W4, 
+                -PM25conc_exposureugm3_W1, -PM25conc_exposureugm3_W2, -PM25conc_exposureugm3_W4) %>% 
+  dplyr::filter(!is.na(ban_status)) %>% 
+  pivot_longer(c(delta_coal_1, delta_wood_1, delta_ele_1, 
+                 delta_coal_2, delta_wood_2, delta_ele_2), 
+               names_to  = "Fuel", 
+               values_to = "quantity") %>% 
+  dplyr::mutate(wave = case_when(Fuel == "delta_coal_1" ~ "W2", 
+                                 Fuel == "delta_wood_1" ~ "W2", 
+                                 Fuel == "delta_ele_1" ~ "W2", 
+                                 Fuel == "delta_coal_2" ~ "W4", 
+                                 Fuel == "delta_wood_2" ~ "W4", 
+                                 Fuel == "delta_ele_2" ~ "W4"), 
+                Fuel = case_when(Fuel == "delta_coal_1" ~ "Coal", 
+                                 Fuel == "delta_wood_1" ~ "Wood", 
+                                 Fuel == "delta_ele_1" ~ "Electricity", 
+                                 Fuel == "delta_coal_2" ~ "Coal", 
+                                 Fuel == "delta_wood_2" ~ "Wood", 
+                                 Fuel == "delta_ele_2" ~ "Electricity"), 
+                treatment = 
+                  case_when(wave == "W2" & ban_status == "Treated Wave 2" ~ "Treated", 
+                            wave == "W2" & ban_status == "Treated Wave 3" ~ "Untreated", 
+                            wave == "W2" & ban_status == "Treated Wave 4" ~ "Untreated", 
+                            wave == "W2" & ban_status == "Untreated" ~ "Untreated", 
+                            wave == "W4" & ban_status == "Treated Wave 2" ~ "Treated", 
+                            wave == "W4" & ban_status == "Treated Wave 3" ~ "Treated", 
+                            wave == "W4" & ban_status == "Treated Wave 4" ~ "Treated", 
+                            wave == "W4" & ban_status == "Untreated" ~ "Untreated"), 
+                intervention = 
+                  case_when(wave == "W2" & ban_status == "Treated Wave 2" ~ "Untreated-Treated", 
+                            wave == "W2" & ban_status == "Treated Wave 3" ~ "Untreated-Untreated", 
+                            wave == "W2" & ban_status == "Treated Wave 4" ~ "Untreated-Untreated", 
+                            wave == "W2" & ban_status == "Untreated" ~ "Untreated-Untreated", 
+                            wave == "W4" & ban_status == "Treated Wave 2" ~ "Treated-Treated", 
+                            wave == "W4" & ban_status == "Treated Wave 3" ~ "Untreated-Treated", 
+                            wave == "W4" & ban_status == "Treated Wave 4" ~ "Untreated-Treated", 
+                            wave == "W4" & ban_status == "Untreated" ~ "Untreated-Untreated"), 
+                WI = case_when(wave == "W2" ~ WI_1, 
+                                 wave == "W4" ~ WI_2),
+                conc = case_when(wave == "W2" ~ delta_conc_1, 
+                                 wave == "W4" ~ delta_conc_2), 
+                change = case_when(conc >= 0 ~ "pos", 
+                                   conc < 0 ~ "neg"), 
+                ratio = quantity/conc) %>% 
+  dplyr::select(-delta_conc_1, -delta_conc_2, -WI_1, -WI_2)
+
+summary <- df_personal_pm_cost %>% 
+  group_by(wave, treatment, ban_status, Fuel) %>% 
+  summarise(Quan = mean(quantity, na.rm = TRUE),
+            Quan_sd = sd(quantity, na.rm = TRUE), 
+            Conc = mean(conc, na.rm = TRUE), 
+            Conc_sd = sd(conc, na.rm = TRUE)) %>% 
+  mutate(wavetreat = paste0(wave, treatment))
+summary
+
+summary %>% 
+  dplyr::mutate(Fuel = case_when(Fuel == "Electricity" ~ "Electricity (\u00D71000 RMB)", 
+                                 Fuel == "Coal" ~ "Coal (ton)", 
+                                 Fuel == "Wood" ~ "Wood (ton)"), 
+                Fuel = factor(Fuel, 
+                              levels = c("Coal (ton)", "Wood (ton)", 
+                                         "Electricity (\u00D71000 RMB)")), 
+                Quan = case_when(Fuel == "Electricity (\u00D71000 RMB)" ~ Quan/1000, 
+                                 TRUE ~ Quan), 
+                Quan_sd = case_when(Fuel == "Electricity (\u00D71000 RMB)" ~ Quan_sd/1000, 
+                                 TRUE ~ Quan_sd), 
+                ban_status = factor(ban_status, 
+                                        levels = c("Treated Wave 2", "Treated Wave 3", 
+                                                   "Treated Wave 4", "Untreated")), 
+                treatment = 
+                  case_when(wave == "W2" & ban_status == "Treated Wave 2" ~ "Untreated-Treated", 
+                            wave == "W2" & ban_status == "Treated Wave 3" ~ "Untreated-Untreated", 
+                            wave == "W2" & ban_status == "Treated Wave 4" ~ "Untreated-Untreated", 
+                            wave == "W2" & ban_status == "Untreated" ~ "Untreated-Untreated", 
+                            wave == "W4" & ban_status == "Treated Wave 2" ~ "Treated-Treated", 
+                            wave == "W4" & ban_status == "Treated Wave 3" ~ "Untreated-Treated", 
+                            wave == "W4" & ban_status == "Treated Wave 4" ~ "Untreated-Treated", 
+                            wave == "W4" & ban_status == "Untreated" ~ "Untreated-Untreated"), 
+                treatment = factor(treatment, 
+                                   levels = c("Untreated-Treated", "Treated-Treated", 
+                                              "Untreated-Untreated"))) %>% 
+ggplot(aes(x = Quan, y = Conc)) + 
+  geom_point(aes(shape = treatment, color = treatment), size = 3, stroke = 2) + 
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey") + 
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey") + 
+  facet_wrap(~Fuel , scales = "free_x") + 
+  scale_color_manual(values = c("#208820", "#78D070", "#000000")) + 
+  scale_shape_manual(values = c(1, 2, 3)) + 
+  theme_bw() + 
+  theme(strip.text = element_text(size = 14), 
+        strip.background = element_rect(color="black", fill = "white", size=0.8, linetype="solid"), 
+        axis.title = element_text(size=14, color="black"),
+        axis.text.x = element_text(size = 14, color = "black"), 
+        axis.text.y = element_text(size = 14, color = "black"), 
+        panel.border = element_rect(size = 1, colour = "black"), 
+        axis.ticks.length = unit(0.15, "cm"), 
+        axis.ticks = element_line(color = "black", linewidth = 0.6), 
+        legend.position = "top", 
+        legend.background = element_blank(), 
+        legend.title = element_blank(), 
+        legend.key.size = unit(0.8, "cm"), 
+        legend.text = element_text(size = 16, color = "black"), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) + 
+  labs(x = "Mean changes in energy consumption", y = bquote(Mean~changes~"in"~concentration~'(μg' ~ m^-3*')'))
+ggsave("../figure/Cost effect.png", width = 10, height = 4.2)
+```
+
+```{r}
+summary_ratio <- df_personal_pm_cost %>% 
+  dplyr::filter(!is.na(ratio)) %>% 
+  dplyr::mutate(intervention = factor(intervention, 
+                               levels = c("Untreated-Treated", "Treated-Treated", 
+                                          "Untreated-Untreated")), 
+         ratio = as.numeric(ratio)) %>% 
+  dplyr::group_by(Fuel, intervention) %>% 
+  dplyr::summarise(n = n(), 
+                   ratio_m = mean(ratio*10), 
+                   ratio_sd = sd(ratio*10))
+summary_ratio
+```
+
+```{r}
+summary_ratio <- df_personal_pm_cost %>% 
+  group_by(intervention, Fuel) %>% 
+  summarise(Quan = mean(quantity, na.rm = TRUE),
+            Quan_sd = sd(quantity, na.rm = TRUE), 
+            Conc = mean(conc, na.rm = TRUE), 
+            Conc_sd = sd(conc, na.rm = TRUE),
+            r = Quan/Conc) 
+summary_ratio
+```
